@@ -1,4 +1,4 @@
-# CoAct-1 Multi-Agent Computer Automation System
+# CoAct-1 Computer-Use Implementation
 
 This directory contains the CoAct-1 implementation — a replica (not the exact code) of a closed-source agent architecture for Computer-Use that enables computer control through both vision (the eye) and code (the programmer). At its core, CoAct-1 is built on top of the CUA (Computer Use Agent) framework, which provides the foundational abstraction layers for agents, computer interaction, and core utilities. The implementation leverages and modifies the original agent, computer, and core directories from the CUA repository, adapting them to align with the CoAct hierarchical architecture.
 
