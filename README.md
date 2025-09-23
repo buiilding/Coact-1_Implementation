@@ -7,7 +7,7 @@ This directory contains the CoAct-1 implementation - a replica (not the exact co
 CoAct-1 implements a hierarchical multi-agent system inspired by the paper ["CoAct: A Multi-Agent System for Cooperative Computer Control"](https://arxiv.org/abs/2508.03923). The system orchestrates three specialized agents to execute computer automation tasks through coordinated action:
 
 - **Orchestrator**: Strategic task decomposition and delegation
-- **Programmer**: Shell command execution and file operations
+- **Programmer**: Shell, Python commands commands execution
 - **GUI Operator**: Vision-based graphical user interface interactions
 
 ## Architecture
