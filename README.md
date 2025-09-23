@@ -12,7 +12,7 @@ CoAct-1 implements a hierarchical multi-agent system inspired by the paper ["CoA
 
 ## Architecture
 
-### Agent Hierarchy
+### Agent Hierarchy(image taken from the paper)
 
 ![CoAct-1 Agent Architecture](images/image.png)
 
@@ -70,9 +70,6 @@ cd coact_implementation
 
 # Install Python dependencies
 pip install -r requirements.txt
-
-# Optional: Install CUDA-enabled PyTorch for GPU acceleration
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
 
 ### 3. Set Environment Variables
@@ -325,7 +322,6 @@ This implementation is for research and educational purposes. See the main proje
 
 - [CoAct Paper](https://arxiv.org/abs/2508.03923)
 - [CUA Framework](https://github.com/trycua/cua)
-- [Computer Use Agent Research](https://www.anthropic.com/research/computer-use)
 
 ## Acknowledgments
 
