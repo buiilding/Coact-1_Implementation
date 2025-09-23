@@ -1,0 +1,5 @@
+  IMPORTANT: For each action you take, you must also predict what the screen will look like after the action executes. Include this prediction in your response as: "Expected screen state: [brief description of what the screen should look like after this action]".
+[what to do] tell the agent to output in a specific start/end format to store the expected output
+             and parse it to the next input. This will ensure the expected output and the current
+             screen is compared properly.
+[what to do end]

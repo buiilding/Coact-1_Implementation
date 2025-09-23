@@ -16,25 +16,8 @@ import os
 import sys
 import logging
 import json
-import subprocess
-import tempfile
-import base64
 import argparse
 from typing import List, Dict, Any, Optional
-
-# # Add local CUA directory to Python path (for development)
-# cua_path = os.path.join(os.path.dirname(__file__), "..")
-# if cua_path not in sys.path:
-#     sys.path.insert(0, cua_path)
-
-# # Also add individual package paths (needed for inter-package imports)
-# agent_path = os.path.join(cua_path, "agent")
-# computer_path = os.path.join(cua_path, "computer")
-# core_path = os.path.join(cua_path, "core")
-
-# for path in [agent_path, computer_path, core_path]:
-#     if path not in sys.path:
-#         sys.path.insert(0, path)
 
 # Import CUA components
 from agent import ComputerAgent
@@ -133,6 +116,64 @@ class ProgrammerTools:
             output += f"Stderr:\n{stderr}\n"
         return output
 
+    async def file_exists(self, path: str) -> bool:
+        """Check if a file exists."""
+        return await self._computer.interface.file_exists(path)
+
+    async def directory_exists(self, path: str) -> bool:
+        """Check if a directory exists."""
+        return await self._computer.interface.directory_exists(path)
+
+    async def read_bytes(self, path: str, offset: int = 0, length: Optional[int] = None) -> bytes:
+        """Read binary content from a file."""
+        return await self._computer.interface.read_bytes(path, offset, length)
+
+    async def write_bytes(self, path: str, content: bytes) -> None:
+        """Write binary content to a file."""
+        await self._computer.interface.write_bytes(path, content)
+
+    async def delete_file(self, path: str) -> None:
+        """Delete a file."""
+        await self._computer.interface.delete_file(path)
+
+    async def create_dir(self, path: str) -> None:
+        """Create a directory."""
+        await self._computer.interface.create_dir(path)
+
+    async def delete_dir(self, path: str) -> None:
+        """Delete a directory."""
+        await self._computer.interface.delete_dir(path)
+
+    async def get_file_size(self, path: str) -> int:
+        """Get the size of a file in bytes."""
+        return await self._computer.interface.get_file_size(path)
+
+    async def copy_to_clipboard(self) -> str:
+        """Copy content from clipboard."""
+        return await self._computer.interface.copy_to_clipboard()
+
+    async def set_clipboard(self, text: str) -> None:
+        """Set clipboard content."""
+        await self._computer.interface.set_clipboard(text)
+
+    async def get_accessibility_tree(self) -> Dict:
+        """Get accessibility tree for UI elements."""
+        return await self._computer.interface.get_accessibility_tree()
+
+    async def venv_install(self, venv_name: str, requirements: List[str]) -> str:
+        """
+        Install packages in a virtual environment.
+        
+        Args:
+            venv_name: Name of the virtual environment.
+            requirements: List of package names to install.
+            
+        Returns:
+            Installation output.
+        """
+        await self._computer.venv_install(venv_name, requirements)
+        return f"Installed packages {requirements} in virtual environment '{venv_name}'"
+
 def get_last_image_b64(messages: List[Dict[str, Any]]) -> Optional[str]:
     """Get the last image from a list of messages, checking both user messages and tool outputs."""
     for message in reversed(messages):
@@ -197,6 +238,7 @@ class GuiOperatorComputerProxy:
             # GUI Screen Methods
             async def screenshot(self): return await self._real_interface.screenshot()
             async def get_screen_size(self): return await self._real_interface.get_screen_size()
+            async def get_cursor_position(self): return await self._real_interface.get_cursor_position()
             async def scroll(self, x: int = 0, y: int = 0, scroll_x: int = 0, scroll_y: int = 0):
                 """Handle scrolling with scroll amounts."""
                 # Use scroll_down/scroll_up for vertical scrolling by amounts
@@ -217,6 +259,19 @@ class GuiOperatorComputerProxy:
                 else:
                     # No vertical scroll, just use coordinates
                     return await self._real_interface.scroll(x, y)
+            async def scroll_down(self, clicks: int = 1, delay: Optional[float] = None): return await self._real_interface.scroll_down(clicks, delay)
+            async def scroll_up(self, clicks: int = 1, delay: Optional[float] = None): return await self._real_interface.scroll_up(clicks, delay)
+
+            # GUI Keyboard Methods (additional)
+            async def key_down(self, key: str, delay: Optional[float] = None): return await self._real_interface.key_down(key, delay)
+            async def key_up(self, key: str, delay: Optional[float] = None): return await self._real_interface.key_up(key, delay)
+
+            # GUI Coordinate Methods
+            async def to_screen_coordinates(self, x: float, y: float): return await self._real_interface.to_screen_coordinates(x, y)
+            async def to_screenshot_coordinates(self, x: float, y: float): return await self._real_interface.to_screenshot_coordinates(x, y)
+
+            # GUI Wait Methods
+            async def wait_for_ready(self, timeout: int = 60): return await self._real_interface.wait_for_ready(timeout)
 
         return GuiInterfaceProxy(real_interface)
 
@@ -241,6 +296,10 @@ class OrchestratorTools:
     async def get_current_url(self) -> str:
         """Get current URL (for browser environments)."""
         return await self._handler.get_current_url()
+
+    async def screenshot(self) -> str:
+        """Take a screenshot for task analysis and planning."""
+        return await self._handler.screenshot()
 
 # --- Orchestrator Agent Tools ---
 
@@ -291,68 +350,7 @@ class CoAct1:
         print("✅ [COACT-1] All agents initialized successfully!")
 
     def _create_orchestrator(self) -> ComputerAgent:
-        instructions = """
-        You are the Orchestrator agent. Your role is to decompose a user's high-level task into a sequence of simple, manageable subtasks.
-        
-        TASK DECOMPOSITION PRINCIPLE:
-        - Analyze BOTH the user's text input AND the current screenshot to understand the starting state
-        - Break down complex tasks into the SMALLEST possible steps - the easier, the better
-        - Each subtask should be a single, clear action that can be completed in one step
-        - Consider what you can see on the current screen when planning the first subtask
-        - Start with the most basic action needed to begin the task
-        
-        For each subtask, decide whether to delegate it to the 'Programmer' agent, the 'GUI Operator' agent, or handle it yourself.
-
-        DELEGATION STRATEGY:
-        - Always prefer the 'Programmer' agent whenever possible for efficiency and reliability.
-        - Only use the 'GUI Operator' agent if the subtask cannot reasonably be accomplished through code or command-line execution.
-        
-        PROGRAMMER AGENT - Use for:
-        - Opening applications (e.g., "Open Firefox Web Browser" → delegate to Programmer with run_command_in_background("firefox"))
-        - File operations and system commands (e.g., "Check if file exists" → delegate to Programmer with run_command("ls filename"))
-        - Any task that can be accomplished with shell commands
-        
-        GUI OPERATOR AGENT - Use for:
-        - Visual interactions that require seeing the screen (clicking buttons, filling forms)
-        - Web browsing and navigation that requires visual feedback
-        - Interacting with graphical applications that don't have command-line interfaces
-        - Drag-and-drop operations
-        - Visual element selection and manipulation
-        - Tasks requiring visual confirmation of results
-
-        TASK DECOMPOSITION EXAMPLES:
-        
-        Example 1: User says "Open Firefox" + Screenshot shows desktop
-        - Analysis: Desktop is visible, need to open Firefox browser
-        - Subtask 1: Delegate to Programmer: "Open Firefox Web Browser using run_command_in_background"
-        - Reason: Single, simple action - opening GUI application
-        
-        Example 2: User says "Check if file exists" + Screenshot shows desktop
-        - Analysis: Need to check file system
-        - Subtask 1: Delegate to Programmer: "Check if file exists using run_command"
-        - Reason: Simple file operation that returns output
-
-        DECOMPOSITION GUIDELINES:
-        - If you see a desktop: First subtask should be opening the required application
-        - If you see a browser: First subtask should be navigating to the target website
-        - If you see a website: First subtask should be the most basic interaction (click, type, scroll)
-        - For terminal tasks: Group terminal operations into single subtasks (e.g., "Create terminal session and run ls command")
-        - For GUI applications: Use run_command_in_background (no parameters needed)
-        - Always break complex actions into individual steps (e.g., "search for laptops" becomes "click search box" + "type laptops" + "press enter")
-        - Each subtask should be completable in 5-10 seconds
-        - Avoid combining multiple actions in a single subtask
-        - IMPORTANT: For terminal tasks, include both session creation AND command execution in one subtask
-        
-        EVALUATION PROCESS:
-        After each sub-agent completes a task, you will receive both a text summary of their actions AND a screenshot showing the final screen state.
-        Carefully evaluate both the summary text and the visual screenshot to determine:
-        - Whether the sub-task was completed successfully
-        - If you need to delegate again to the same agent to fix or continue the task
-        - If you should switch to a different agent or approach
-        - Whether the overall goal has been achieved
-        
-        Use the 'task_completed' function when the user's overall goal has been achieved.
-        """
+        instructions = open("agent_prompts/Orchestrator.txt", "r").read()
 
         
         # Gather all methods from the toolkit instance to pass to the agent
@@ -360,6 +358,7 @@ class CoAct1:
             self.orchestrator_tools.get_environment,
             self.orchestrator_tools.get_dimensions,
             self.orchestrator_tools.get_current_url,
+            self.orchestrator_tools.screenshot,
             delegate_to_programmer, 
             delegate_to_gui_operator, 
             task_completed
@@ -374,32 +373,28 @@ class CoAct1:
         )
 
     def _create_programmer(self) -> ComputerAgent:
-        instructions = """
-        You are the Programmer agent. You solve tasks by writing and executing shell commands.
-
-        COMMAND EXECUTION TOOLS:
-
-        1. 'run_command' - Runs a shell command and waits for output:
-           - Use this for commands where you need to see the results (ls, cat, grep, etc.)
-           - Executes the command and returns stdout/stderr output
-           - Waits for the command to complete
-
-        2. 'run_command_in_background' - Runs a shell command in the background:
-           - Use this for opening applications (firefox, chrome, xterm, etc.)
-           - Commands start immediately without waiting for output
-           - Perfect for GUI applications that run indefinitely
-
-        DECISION GUIDELINES:
-        - Use 'run_command' for: file operations, checking status, getting output, any command where you need results
-        - Use 'run_command_in_background' for: opening browsers, editors, terminals, any GUI application
-
-        You will be given a subtask from the Orchestrator. Execute the appropriate commands to complete it.
-        """
+        instructions = open("agent_prompts/Programmer.txt", "r").read()
         
         # Gather all methods from the toolkit instance
         programmer_tool_methods = [
-            self.programmer_tools.run_command,
-            self.programmer_tools.run_command_in_background,
+            self.programmer_tools.run_command, 
+            self.programmer_tools.run_command_in_background, 
+            self.programmer_tools.list_dir, 
+            self.programmer_tools.read_file, 
+            self.programmer_tools.write_file, 
+            self.programmer_tools.venv_cmd,
+            self.programmer_tools.file_exists,
+            self.programmer_tools.directory_exists,
+            self.programmer_tools.read_bytes,
+            self.programmer_tools.write_bytes,
+            self.programmer_tools.delete_file,
+            self.programmer_tools.create_dir,
+            self.programmer_tools.delete_dir,
+            self.programmer_tools.get_file_size,
+            self.programmer_tools.copy_to_clipboard,
+            self.programmer_tools.set_clipboard,
+            self.programmer_tools.get_accessibility_tree,
+            self.programmer_tools.venv_install,
         ]
 
         print(f"👨‍💻 [PROGRAMMER] Initializing with model: {self.programmer_model}")
@@ -411,91 +406,7 @@ class CoAct1:
         )
 
     def _create_gui_operator(self) -> ComputerAgent:
-        instructions = """
-        You are the GUI Operator, a vision-based agent. Your ONLY way to interact with the computer is by using the `computer` tool to perform visual actions like clicking and typing on elements.
-        You CANNOT execute shell commands.
-
-        CRITICAL EFFICIENCY PRINCIPLE: Minimize grounding model calls by preferring keyboard actions over mouse clicks whenever possible. Use Enter, Tab, arrows, and shortcuts instead of clicking buttons and UI elements.
-
-        CRITICAL: You MUST use the function name "computer" (not "function_name" or any other name) when making tool calls.
-
-        You will be given a subtask from the Orchestrator and views of the screen.
-        Your task is to identify visual elements on the screen and use them to accomplish the subtask with maximum efficiency.
-
-        IMPORTANT: For each action you take, you must also predict what the screen will look like after the action executes. Include this prediction in your response as: "Expected screen state: [brief description of what the screen should look like after this action]".
-
-        On subsequent turns, you will receive both the "BEFORE ACTION" image (what you saw when deciding on the previous action) and the "AFTER ACTION" image (actual result of that action), allowing you to compare your prediction with reality and learn from discrepancies.
-
-        TOOL USAGE RULES:
-        1. ALWAYS use the function name "computer" for all tool calls
-        2. PRIORITIZE actions that DON'T require grounding model calls (keypress, type without element_description)
-        3. For typing: FIRST click on the input field to focus it, THEN use computer(action='type', text='text to type')
-        4. For clicking: ONLY use computer(action='click', element_description='...') when absolutely necessary
-        5. For keyboard shortcuts: Use computer(action='keypress', keys=['key']) instead of clicking buttons
-        6. For form submission: Use Enter key instead of clicking submit buttons
-        7. For navigation: Use Tab, arrow keys instead of clicking when possible
-
-        ELEMENT DESCRIPTION GUIDELINES:
-        - Be specific and descriptive (e.g., "the blue login button with text 'Log In'" not just "button")
-        - Include visual characteristics like color, text, position, or size
-        - Use consistent descriptions but different in wording for the same element across multiple attempts
-        - If there are more than 5 attempts trying to click on the same element, try another method, click on another element for example.
-
-        CRITICAL EFFICIENCY WORKFLOW:
-        - MINIMIZE grounding model calls by preferring keyboard actions over mouse clicks
-        - For search/forms: Type text, then press Enter instead of clicking search/submit buttons
-        - For navigation: Use Tab, arrow keys, Page Up/Down instead of scrolling or clicking
-        - For common actions: Use keyboard shortcuts (Ctrl+A, Ctrl+C, Ctrl+V, etc.)
-        - Only click when keyboard navigation is impossible or inefficient
-        - For typing: Click input field to focus, then type + Enter when possible
-        - ERROR RECOVERY: If action result is unexpected, immediately try keyboard recovery:
-          - Wrong page/navigation: Alt+Left Arrow (browser back)
-          - Wrong text input: Ctrl+Z (undo)
-          - Modal/dialog appeared: ESC (cancel)
-          - Page didn't load: F5 (refresh)
-          - If all keyboard methods fail: Click browser back button (requires grounding)
-
-        WORKFLOW:
-        1. Analyze the screen and think about the most efficient way to accomplish the task
-        2. Prioritize keyboard-based actions (Enter, Tab, arrows, shortcuts) over mouse clicks
-        3. For forms/search: Focus input field → Type text → Press Enter (avoids clicking buttons)
-        4. For navigation: Use keyboard shortcuts and arrow keys when possible
-        5. Only use mouse clicks (with grounding) when keyboard navigation is impossible
-        6. Make computer calls with the correct function name "computer"
-        7. Wait for the result and evaluate if the action was successful
-        8. If unsuccessful, try keyboard alternatives first, then mouse clicks as last resort
-        9. ERROR RECOVERY: If screenshot shows unexpected state, use these recovery methods (in priority order):
-           - Browser: Alt+Left Arrow (back) or Ctrl+[ (back in some browsers)
-           - General: ESC key to cancel dialogs/modals
-           - Text editing: Ctrl+Z (undo)
-           - Navigation: Ctrl+Home (go to top) or Ctrl+End (go to bottom)
-           - Browser refresh: F5 or Ctrl+R (if page didn't load properly)
-           - LAST RESORT (requires grounding): Click browser back button with computer(action='click', element_description='browser back button arrow')
-        10. Once the subtask is complete, respond with a final message summarizing your actions
-
-        EFFICIENCY RULES (HIGHEST PRIORITY):
-        - MINIMIZE mouse clicks - use keyboard actions whenever possible
-        - For search boxes: Type query + press Enter (no button clicking needed)
-        - For forms: Fill fields + press Enter or Tab to submit
-        - For navigation: Use arrow keys, Tab, Page Up/Down, Home/End
-        - For selection: Use Shift+arrow keys instead of drag-selecting
-        - For copy/paste: Use Ctrl+C, Ctrl+V instead of right-click menus
-        - ERROR RECOVERY (keyboard-first):
-          - Browser back: Alt+Left Arrow or Ctrl+[
-          - Cancel/escape: ESC key
-          - Undo: Ctrl+Z
-          - Page navigation: Ctrl+Home/End
-          - Refresh: F5 or Ctrl+R
-          - Last resort (grounding required): Click browser back button
-
-        GUI OPERATION RULES (when mouse clicks are necessary):
-        - To open any app on the desktop, you MUST use double_click, NOT single click
-        - For app icons: computer(action='double_click', element_description='app name icon')
-        - For buttons and links: computer(action='click', element_description='button description') - USE AS LAST RESORT
-        - For text fields: FIRST use computer(action='click', element_description='input field description') to focus the field, THEN use computer(action='type', text='text to type') to input text
-
-        Remember: Use "computer" as the function name, be specific in element descriptions, and evaluate results before making additional attempts. If the results meet the requirements, you can end the task.
-        """
+        instructions = open("agent_prompts/GUIOperator.txt", "r").read()
         print(f"🎭 [GUI OPERATOR] Initializing with model: {self.gui_operator_model}")
         return ComputerAgent(
             model=self.gui_operator_model,
@@ -503,7 +414,7 @@ class CoAct1:
             instructions=instructions,
             verbosity=logging.WARNING,
             quantization_bits=8,
-            trust_remote_code=True,  # Required for InternVL models
+            trust_remote_code=True,  
             screenshot_delay=1.0,  # Wait 1 second after actions before screenshot
         )
 
