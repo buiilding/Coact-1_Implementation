@@ -14,14 +14,7 @@ CoAct-1 implements a hierarchical multi-agent system inspired by the paper ["CoA
 
 ### Agent Hierarchy
 
-```
-┌─────────────────┐
-│   Orchestrator  │ ← High-level task planning & coordination
-├─────────────────┤
-│   Programmer    │ ← Code execution & system commands
-│   GUI Operator  │ ← Vision-based GUI interactions
-└─────────────────┘
-```
+![CoAct-1 Agent Architecture](images/image.png)
 
 ### Agent Responsibilities
 
