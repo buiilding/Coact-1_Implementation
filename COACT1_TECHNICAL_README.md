@@ -55,17 +55,26 @@
 - `run_command_in_background`: For GUI applications (firefox, chrome)
 
 ### 3. GUI Operator Agent
-**Role**: Vision-based graphical user interface interactions
+**Role**: Vision-based graphical user interface interactions with OCR capabilities
 **Model**: `huggingface-local/OpenGVLab/InternVL3_5-4B+gemini/gemini-2.5-flash`
 **Capabilities**:
 - Visual element detection and interaction
+- OCR text detection and extraction
+- Click-by-text functionality
 - Mouse and keyboard simulation
 - Screenshot analysis and prediction
+
+**OCR Features**:
+- **RapidOCR Integration**: Automatic text element detection from screenshots
+- **Bounding Box Generation**: Precise coordinate mapping for text elements
+- **Confidence Scoring**: Quality assessment for detected text elements
+- **Text-based Interaction**: Direct clicking on detected text elements by ID
 
 **Efficiency Principles**:
 - Minimize grounding model calls (vision-based element detection)
 - Prefer keyboard shortcuts over mouse clicks
 - Use Enter/Tab navigation instead of clicking buttons
+- Leverage OCR for precise text element interactions
 - Predict screen state changes for each action
 
 ## Implementation Details
@@ -75,9 +84,11 @@
 #### GuiOperatorComputerProxy
 ```python
 class GuiOperatorComputerProxy:
-    """Restricts GUI Operator to visual-only interactions"""
+    """Restricts GUI Operator to visual-only interactions with OCR support"""
 ```
 - Proxies the Computer object to expose only GUI-relevant methods
+- Includes OCR callback for automatic text element detection
+- Provides `click_ocr_text()`, `right_click_ocr_text()`, `double_click_ocr_text()` methods
 - Prevents shell command execution by GUI Operator
 - Ensures clean separation of concerns between agents
 
@@ -85,6 +96,7 @@ class GuiOperatorComputerProxy:
 - **Mouse**: `left_click`, `right_click`, `double_click`, `move_cursor`, `drag`
 - **Keyboard**: `type_text`, `press_key`, `hotkey`
 - **Screen**: `screenshot`, `get_screen_size`
+- **OCR**: `click_ocr_text`, `right_click_ocr_text`, `double_click_ocr_text`
 - **System**: `run_command`, `list_dir`, `read_text`, `write_text`
 
 ### Agent Communication Protocol
@@ -125,10 +137,17 @@ task_completed()  # Signal completion
 - Integrated into chat messages for multimodal reasoning
 - Used by both Orchestrator (task planning) and GUI Operator (element detection)
 
+#### OCR Processing Pipeline
+- **RapidOCR Engine**: Fast text detection from screenshots
+- **Text Element Extraction**: Identifies clickable text elements with confidence scores
+- **Bounding Box Calculation**: Maps text positions to screen coordinates
+- **LLM Integration**: OCR results injected into prompts for intelligent text interactions
+
 #### Grounding Model Calls
 - **InternVL**: Local vision model for element detection
 - **Gemini**: Remote multimodal model for planning and reasoning
-- Optimized to minimize expensive vision calls
+- **OCR Enhancement**: Text detection reduces need for expensive vision calls
+- Optimized to minimize expensive model calls through OCR preprocessing
 
 ## Configuration & Models
 
@@ -217,6 +236,8 @@ python coact_1_example.py -m "Go to Amazon and find the cheapest laptop"
 - `transformers`: Hugging Face model loading
 - `torch`: PyTorch deep learning framework
 - `accelerate`: Multi-GPU training/inference
+- `rapidocr-onnxruntime`: Fast OCR text detection
+- `Pillow`: Image processing for OCR
 
 ### System Integration
 - `docker`: Container management

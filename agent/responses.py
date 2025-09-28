@@ -403,30 +403,39 @@ def convert_computer_calls_xy2desc(responses_items: List[Dict[str, Any]], desc2x
 def get_all_element_descriptions(responses_items: List[Dict[str, Any]]) -> List[str]:
     """
     Extract all element descriptions from computer calls in responses items.
-    
+    Only extracts descriptions from actions that require visual grounding.
+
     Args:
         responses_items: List of response items containing computer calls
-        
+
     Returns:
-        List of unique element descriptions found in computer calls
+        List of unique element descriptions found in computer calls that need grounding
     """
     descriptions = set()
-    
+
+    # Actions that require visual grounding to find coordinates
+    grounding_required_actions = {
+        "click", "double_click", "move", "scroll", "drag"
+    }
+
     for item in responses_items:
         if item.get("type") == "computer_call" and "action" in item:
             action = item["action"]
-            
-            # Handle single element_description
-            if "element_description" in action:
-                descriptions.add(action["element_description"])
-            
-            # Handle start_element_description and end_element_description for drag operations
-            if "start_element_description" in action:
-                descriptions.add(action["start_element_description"])
-            
-            if "end_element_description" in action:
-                descriptions.add(action["end_element_description"])
-    
+            action_type = action.get("type", "")
+
+            # Only extract element descriptions for actions that need grounding
+            if action_type in grounding_required_actions:
+                # Handle single element_description
+                if "element_description" in action:
+                    descriptions.add(action["element_description"])
+
+                # Handle start_element_description and end_element_description for drag operations
+                if "start_element_description" in action:
+                    descriptions.add(action["start_element_description"])
+
+                if "end_element_description" in action:
+                    descriptions.add(action["end_element_description"])
+
     return list(descriptions)
 
 

@@ -16,8 +16,9 @@ import os
 import sys
 import logging
 import json
-import argparse
-from typing import List, Dict, Any, Optional
+import websockets
+import functools
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 # Import CUA components
 from agent import ComputerAgent
@@ -25,295 +26,15 @@ from computer import Computer, VMProviderType
 # from agent.callbacks import AsyncCallbackHandler
 # from agent.computers.base import AsyncComputerHandler
 from agent.computers.cua import cuaComputerHandler
-import litellm
+
+# Import agent modules
+from orchestrator import OrchestratorTools, create_orchestrator
+from Programmer import ProgrammerTools, create_programmer
+from GUIOperator import create_gui_operator
 
 # Set up logging
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
-
-# --- Toolkits for Agents ---
-
-class ProgrammerTools:
-    """A toolkit for the Programmer agent that provides code and system-level tools."""
-
-    def __init__(self, computer: Computer):
-        self._computer = computer
-
-    async def run_command(self, command: str) -> str:
-        """
-        Runs a shell command and waits for output.
-        Use this for commands where you need to see the results (ls, cat, grep, etc.).
-
-        Args:
-            command (str): The shell command to execute.
-
-        Returns:
-            str: The command output.
-        """
-        try:
-            result = await self._computer.interface.run_command(command)
-            output = f"Stdout:\n{result.stdout}\n"
-            if result.stderr:
-                output += f"Stderr:\n{result.stderr}\n"
-            return output
-        except Exception as e:
-            return f"Error running command '{command}': {e}"
-
-    async def run_command_in_background(self, command: str) -> str:
-        """
-        Runs a shell command in the background without waiting for output.
-        Use this for opening applications (firefox, chrome, xterm, etc.).
-
-        Args:
-            command (str): The shell command to execute.
-
-        Returns:
-            str: Confirmation that the command was started in background.
-        """
-        # Run command in background with complete detachment
-        background_command = f"setsid {command} >/dev/null 2>&1 &"
-
-        # Create a task to run the command without blocking
-        async def run_background_command():
-            try:
-                await self._computer.interface.run_command(background_command)
-            except Exception:
-                # Ignore errors since we're not waiting anyway
-                pass
-
-        # Start the task but don't wait for it
-        asyncio.create_task(run_background_command())
-
-        # Return immediately - no output capture, no waiting
-        return f"Command '{command}' started in background."
-
-    async def list_dir(self, path: str) -> List[str]:
-        """Lists the contents of a directory."""
-        return await self._computer.interface.list_dir(path)
-
-    async def read_file(self, path: str) -> str:
-        """Reads the text content of a file."""
-        return await self._computer.interface.read_text(path)
-
-    async def write_file(self, path: str, content: str):
-        """Writes text content to a file."""
-        await self._computer.interface.write_text(path, content)
-    
-    async def venv_cmd(self, venv_name: str, command: str) -> str:
-        """
-        Execute a shell command in a virtual environment.
-        
-        Args:
-            venv_name: Name of the virtual environment.
-            command: Shell command to execute.
-            
-        Returns:
-            The stdout and stderr from the command execution.
-        """
-        stdout, stderr = await self._computer.venv_cmd(venv_name, command)
-        output = f"Stdout:\n{stdout}\n"
-        if stderr:
-            output += f"Stderr:\n{stderr}\n"
-        return output
-
-    async def file_exists(self, path: str) -> bool:
-        """Check if a file exists."""
-        return await self._computer.interface.file_exists(path)
-
-    async def directory_exists(self, path: str) -> bool:
-        """Check if a directory exists."""
-        return await self._computer.interface.directory_exists(path)
-
-    async def read_bytes(self, path: str, offset: int = 0, length: Optional[int] = None) -> bytes:
-        """Read binary content from a file."""
-        return await self._computer.interface.read_bytes(path, offset, length)
-
-    async def write_bytes(self, path: str, content: bytes) -> None:
-        """Write binary content to a file."""
-        await self._computer.interface.write_bytes(path, content)
-
-    async def delete_file(self, path: str) -> None:
-        """Delete a file."""
-        await self._computer.interface.delete_file(path)
-
-    async def create_dir(self, path: str) -> None:
-        """Create a directory."""
-        await self._computer.interface.create_dir(path)
-
-    async def delete_dir(self, path: str) -> None:
-        """Delete a directory."""
-        await self._computer.interface.delete_dir(path)
-
-    async def get_file_size(self, path: str) -> int:
-        """Get the size of a file in bytes."""
-        return await self._computer.interface.get_file_size(path)
-
-    async def copy_to_clipboard(self) -> str:
-        """Copy content from clipboard."""
-        return await self._computer.interface.copy_to_clipboard()
-
-    async def set_clipboard(self, text: str) -> None:
-        """Set clipboard content."""
-        await self._computer.interface.set_clipboard(text)
-
-    async def get_accessibility_tree(self) -> Dict:
-        """Get accessibility tree for UI elements."""
-        return await self._computer.interface.get_accessibility_tree()
-
-    async def venv_install(self, venv_name: str, requirements: List[str]) -> str:
-        """
-        Install packages in a virtual environment.
-        
-        Args:
-            venv_name: Name of the virtual environment.
-            requirements: List of package names to install.
-            
-        Returns:
-            Installation output.
-        """
-        await self._computer.venv_install(venv_name, requirements)
-        return f"Installed packages {requirements} in virtual environment '{venv_name}'"
-
-def get_last_image_b64(messages: List[Dict[str, Any]]) -> Optional[str]:
-    """Get the last image from a list of messages, checking both user messages and tool outputs."""
-    for message in reversed(messages):
-        # Check user messages with content lists
-        if message.get("role") == "user" and isinstance(message.get("content"), list):
-            for content_item in reversed(message["content"]):
-                if content_item.get("type") == "image_url":
-                    image_url = content_item.get("image_url", {}).get("url", "")
-                    if image_url.startswith("data:image/png;base64,"):
-                        return image_url.split(",", 1)[1]
-        
-        # Check computer call outputs
-        elif message.get("type") == "computer_call_output" and isinstance(message.get("output"), dict):
-            output = message["output"]
-            if output.get("type") == "input_image":
-                image_url = output.get("image_url", "")
-                if image_url.startswith("data:image/png;base64,"):
-                    return image_url.split(",", 1)[1]
-
-        # Check function call outputs (for orchestrator results with multimodal content)
-        elif message.get("type") == "function_call_output" and isinstance(message.get("output"), list):
-            for content_item in reversed(message["output"]):
-                if content_item.get("type") == "image_url":
-                    image_url = content_item.get("image_url", {}).get("url", "")
-                if image_url.startswith("data:image/png;base64,"):
-                    return image_url.split(",", 1)[1]
-    return None
-
-class GuiOperatorComputerProxy:
-    """
-    A proxy for the Computer object that exposes only GUI-related methods.
-    This is necessary because the ComputerAgent has special handling for 'computer' tools,
-    and we want to provide a restricted set of a computer's capabilities.
-    """
-    def __init__(self, computer: Computer):
-        # We need to hold a reference to the original computer object
-        # and its interface to delegate the calls.
-        self._computer_instance = computer
-        self.interface = self._create_gui_interface_proxy(computer.interface)
-        self.is_gui_proxy = True
-
-    def _create_gui_interface_proxy(self, real_interface):
-        class GuiInterfaceProxy:
-            """A proxy that exposes only the GUI-related methods of the real interface."""
-            def __init__(self, interface):
-                self._real_interface = interface
-
-            # GUI Mouse Methods
-            async def left_click(self, x: int, y: int, delay: Optional[float] = None): return await self._real_interface.left_click(x, y, delay)
-            async def right_click(self, x: int, y: int, delay: Optional[float] = None): return await self._real_interface.right_click(x, y, delay)
-            async def double_click(self, x: int, y: int, delay: Optional[float] = None): return await self._real_interface.double_click(x, y, delay)
-            async def move_cursor(self, x: int, y: int, delay: Optional[float] = None): return await self._real_interface.move_cursor(x, y, delay)
-            async def mouse_down(self, x: int, y: int, button: str = "left"): return await self._real_interface.mouse_down(x, y, button)
-            async def mouse_up(self, x: int, y: int, button: str = "left"): return await self._real_interface.mouse_up(x, y, button)
-            async def drag(self, path, button="left", duration=0.5): return await self._real_interface.drag(path, button, duration)
-
-            # GUI Keyboard Methods
-            async def type_text(self, text: str, delay: Optional[float] = None): return await self._real_interface.type_text(text, delay)
-            async def press_key(self, key: str, delay: Optional[float] = None): return await self._real_interface.press_key(key, delay)
-            async def hotkey(self, *keys: str, delay: Optional[float] = None): return await self._real_interface.hotkey(*keys, delay=delay)
-            
-            # GUI Screen Methods
-            async def screenshot(self): return await self._real_interface.screenshot()
-            async def get_screen_size(self): return await self._real_interface.get_screen_size()
-            async def get_cursor_position(self): return await self._real_interface.get_cursor_position()
-            async def scroll(self, x: int = 0, y: int = 0, scroll_x: int = 0, scroll_y: int = 0):
-                """Handle scrolling with scroll amounts."""
-                # Use scroll_down/scroll_up for vertical scrolling by amounts
-                if scroll_y > 0:
-                    # Scroll down by the specified amount
-                    clicks = max(1, scroll_y // 100)  # Convert scroll amount to clicks
-                    if hasattr(self._real_interface, 'scroll_down'):
-                        return await self._real_interface.scroll_down(clicks)
-                    else:
-                        return await self._real_interface.scroll(x, y)
-                elif scroll_y < 0:
-                    # Scroll up by the specified amount
-                    clicks = max(1, abs(scroll_y) // 100)  # Convert scroll amount to clicks
-                    if hasattr(self._real_interface, 'scroll_up'):
-                        return await self._real_interface.scroll_up(clicks)
-                    else:
-                        return await self._real_interface.scroll(x, y)
-                else:
-                    # No vertical scroll, just use coordinates
-                    return await self._real_interface.scroll(x, y)
-            async def scroll_down(self, clicks: int = 1, delay: Optional[float] = None): return await self._real_interface.scroll_down(clicks, delay)
-            async def scroll_up(self, clicks: int = 1, delay: Optional[float] = None): return await self._real_interface.scroll_up(clicks, delay)
-
-            # GUI Keyboard Methods (additional)
-            async def key_down(self, key: str, delay: Optional[float] = None): return await self._real_interface.key_down(key, delay)
-            async def key_up(self, key: str, delay: Optional[float] = None): return await self._real_interface.key_up(key, delay)
-
-            # GUI Coordinate Methods
-            async def to_screen_coordinates(self, x: float, y: float): return await self._real_interface.to_screen_coordinates(x, y)
-            async def to_screenshot_coordinates(self, x: float, y: float): return await self._real_interface.to_screenshot_coordinates(x, y)
-
-            # GUI Wait Methods
-            async def wait_for_ready(self, timeout: int = 60): return await self._real_interface.wait_for_ready(timeout)
-
-        return GuiInterfaceProxy(real_interface)
-
-    # The ComputerAgent's handler needs to check if the computer is initialized.
-    @property
-    def _initialized(self):
-        return self._computer_instance._initialized
-
-class OrchestratorTools:
-    """A toolkit for the Orchestrator agent that provides observation tools."""
-    def __init__(self, computer_handler: 'cuaComputerHandler'):
-        self._handler = computer_handler
-    
-    async def get_environment(self) -> str:
-        """Get the current environment type (e.g., 'linux', 'windows')."""
-        return await self._handler.get_environment()
-
-    async def get_dimensions(self) -> tuple[int, int]:
-        """Get screen dimensions as (width, height)."""
-        return await self._handler.get_dimensions()
-
-    async def get_current_url(self) -> str:
-        """Get current URL (for browser environments)."""
-        return await self._handler.get_current_url()
-
-    async def screenshot(self) -> str:
-        """Take a screenshot for task analysis and planning."""
-        return await self._handler.screenshot()
-
-# --- Orchestrator Agent Tools ---
-
-def delegate_to_programmer(subtask: str):
-    """Delegates a subtask to the programmer agent for code-based execution."""
-    pass
-
-def delegate_to_gui_operator(subtask: str):
-    """Delegates a subtask to the GUI operator for visual, UI-based execution."""
-    pass
-
-def task_completed():
-    """Signals that the overall task is completed."""
-    pass
 
 # --- CoAct-1 System ---
 
@@ -321,13 +42,18 @@ class CoAct1:
     """
     Implements the CoAct-1 multi-agent system.
     """
-    def __init__(self, computer: Computer, orchestrator_model: str, programmer_model: str, gui_operator_model: str):
+    def __init__(self, computer: Computer, orchestrator_model: str, programmer_model: str, gui_operator_model: str, websocket_port: int = 8765):
         self.computer = computer
-        
+
         # Store model names
         self.orchestrator_model = orchestrator_model
         self.programmer_model = programmer_model
         self.gui_operator_model = gui_operator_model
+
+        # WebSocket server for real-time updates
+        self.websocket_port = websocket_port
+        self.websocket_clients: Set[websockets.WebSocketServerProtocol] = set()
+        self.websocket_server = None
 
         # The cuaComputerHandler is the component that translates agent actions
         # into calls on the computer interface. We can reuse it.
@@ -341,155 +67,250 @@ class CoAct1:
         # Create specialized toolkits for each agent
         self.orchestrator_tools = OrchestratorTools(computer_handler)
         self.programmer_tools = ProgrammerTools(computer)
-        self.gui_operator_computer = GuiOperatorComputerProxy(computer)
-        
-        self.orchestrator = self._create_orchestrator()
-        self.programmer = self._create_programmer()
-        self.gui_operator = self._create_gui_operator()
+
+        self.orchestrator = create_orchestrator(orchestrator_model, self.orchestrator_tools, self.broadcast_function_call)
+        self.programmer = create_programmer(programmer_model, self.programmer_tools, self.broadcast_screenshot, self.broadcast_function_call)
+        self.gui_operator = create_gui_operator(
+            gui_operator_model,
+            computer,
+            self.broadcast_ocr_results,
+            self.broadcast_grounding_call,
+            self.broadcast_function_call,
+            self.broadcast_screenshot
+        )
 
         print("✅ [COACT-1] All agents initialized successfully!")
 
-    def _create_orchestrator(self) -> ComputerAgent:
-        instructions = open("agent_prompts/Orchestrator.txt", "r").read()
+        # Start WebSocket server for real-time updates
+        self.start_websocket_server()
 
-        
-        # Gather all methods from the toolkit instance to pass to the agent
-        orchestrator_tool_methods = [
-            self.orchestrator_tools.get_environment,
-            self.orchestrator_tools.get_dimensions,
-            self.orchestrator_tools.get_current_url,
-            self.orchestrator_tools.screenshot,
-            delegate_to_programmer, 
-            delegate_to_gui_operator, 
-            task_completed
-        ]
-
-        print(f"🎯 [ORCHESTRATOR] Initializing with model: {self.orchestrator_model}")
-        return ComputerAgent(
-            model=self.orchestrator_model,
-            tools=orchestrator_tool_methods,
-            instructions=instructions,
-            verbosity=logging.WARNING
-        )
-
-    def _create_programmer(self) -> ComputerAgent:
-        instructions = open("agent_prompts/Programmer.txt", "r").read()
-        
-        # Gather all methods from the toolkit instance
-        programmer_tool_methods = [
-            self.programmer_tools.run_command, 
-            self.programmer_tools.run_command_in_background, 
-            self.programmer_tools.list_dir, 
-            self.programmer_tools.read_file, 
-            self.programmer_tools.write_file, 
-            self.programmer_tools.venv_cmd,
-            self.programmer_tools.file_exists,
-            self.programmer_tools.directory_exists,
-            self.programmer_tools.read_bytes,
-            self.programmer_tools.write_bytes,
-            self.programmer_tools.delete_file,
-            self.programmer_tools.create_dir,
-            self.programmer_tools.delete_dir,
-            self.programmer_tools.get_file_size,
-            self.programmer_tools.copy_to_clipboard,
-            self.programmer_tools.set_clipboard,
-            self.programmer_tools.get_accessibility_tree,
-            self.programmer_tools.venv_install,
-        ]
-
-        print(f"👨‍💻 [PROGRAMMER] Initializing with model: {self.programmer_model}")
-        return ComputerAgent(
-            model=self.programmer_model,
-            tools=programmer_tool_methods,
-            instructions=instructions,
-            verbosity=logging.WARNING
-        )
-
-    def _create_gui_operator(self) -> ComputerAgent:
-        instructions = open("agent_prompts/GUIOperator.txt", "r").read()
-        print(f"🎭 [GUI OPERATOR] Initializing with model: {self.gui_operator_model}")
-        return ComputerAgent(
-            model=self.gui_operator_model,
-            tools=[self.gui_operator_computer],
-            instructions=instructions,
-            verbosity=logging.WARNING,
-            quantization_bits=8,
-            trust_remote_code=True,  
-            screenshot_delay=1.0,  # Wait 1 second after actions before screenshot
-        )
-
-    async def _summarize_interaction(self, history: List[Dict[str, Any]], screenshot_b64: str) -> str:
-        """Summarizes a sub-agent's conversation history."""
-        prompt = "Please summarize the following interaction history in one sentence for the Orchestrator. The user's request is at the beginning, followed by the agent's actions. The final screenshot shows the result of the actions."
-        
-        # Filter out screenshots from the history to reduce token count
-        filtered_history = []
-        image_count = 0
-        for item in history:
-            if "image_url" not in json.dumps(item):
-                filtered_history.append(item)
-            else:
-                image_count += 1
-
-        # Debug: Print details about the input before summarization
-        print(f"📊 Summarization input details:")
-        print(f"   📝 Total history items: {len(history)}")
-        print(f"   🖼️  Images in history: {image_count}")
-        print(f"   📄 Filtered history items: {len(filtered_history)}")
-        print(f"   📸 Screenshot provided: {'Yes' if screenshot_b64 else 'No'}")
-        print(f"   📝 Full text input:")
-        print(f"   {json.dumps(filtered_history, indent=2)}")
-
-        content = [{"type": "text", "text": f"{prompt}\n\nHistory:\n{json.dumps(filtered_history, indent=2)}"}]
-
-        if screenshot_b64:
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}})
-
-        summary_messages = [{
-            "role": "user",
-            "content": content
-        }]
-
+    async def websocket_handler(self, websocket):
+        """Handle WebSocket connections for real-time updates."""
+        print(f"📡 New WebSocket connection from {websocket.remote_address}")
+        self.websocket_clients.add(websocket)
         try:
-            response = await litellm.acompletion(
-                model="gemini/gemini-2.5-flash",
-                messages=summary_messages,
-            )
-            summary = response.choices[0].message.content or "No summary available."
-            return summary.strip()
-        except Exception as e:
-            logger.error(f"Error during summarization: {e}")
-            return "Could not summarize the interaction."
+            await websocket.wait_closed()
+        finally:
+            self.websocket_clients.remove(websocket)
+            print(f"📡 WebSocket connection closed for {websocket.remote_address}")
+
+            # Broadcast UI reset when connection is lost
+            if not self.websocket_clients:  # Only reset if no clients remain
+                await self.broadcast_event("ui_reset", {
+                    "reason": "websocket_disconnected",
+                    "message": "Connection lost - resetting UI to initial state",
+                    "timestamp": asyncio.get_event_loop().time()
+                })
+                print("🔄 Broadcasted UI reset due to WebSocket disconnection")
+
+    def start_websocket_server(self):
+        """Initialize the WebSocket server for real-time updates."""
+        print(f"🚀 Initializing WebSocket server on port {self.websocket_port}")
+
+        # Use functools.partial to bind the instance method
+        handler = functools.partial(self.websocket_handler)
+
+        self.websocket_server = websockets.serve(
+            handler,
+            "localhost",
+            self.websocket_port
+        )
+
+    async def start_websocket_server_async(self):
+        """Start the WebSocket server asynchronously."""
+        if self.websocket_server:
+            # Start the WebSocket server
+            await self.websocket_server.__aenter__()
+            print(f"✅ WebSocket server started on port {self.websocket_port}")
+
+    async def stop_websocket_server(self):
+        """Stop the WebSocket server."""
+        if self.websocket_server:
+            try:
+                await self.websocket_server.__aexit__(None, None, None)
+            except Exception as e:
+                print(f"⚠️ Error stopping WebSocket server: {e}")
+
+        # Broadcast UI reset before closing connections
+        await self.broadcast_event("ui_reset", {
+            "reason": "server_shutdown",
+            "message": "Server shutting down - resetting UI to initial state",
+            "timestamp": asyncio.get_event_loop().time()
+        })
+        print("🔄 Broadcasted UI reset due to server shutdown")
+
+        # Close all client connections
+        for client in self.websocket_clients.copy():
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+        self.websocket_clients.clear()
+        print("🧹 WebSocket server stopped")
+
+    async def broadcast_event(self, event_type: str, data: Dict[str, Any]):
+        """Broadcast an event to all connected WebSocket clients."""
+        print(f"📡 Broadcasting event: {event_type} to {len(self.websocket_clients)} clients")
+        if not self.websocket_clients:
+            print("⚠️ No WebSocket clients connected")
+            return
+
+        message = {
+            "type": event_type,
+            "data": data,
+            "timestamp": asyncio.get_event_loop().time()
+        }
+
+        # Convert message to JSON
+        json_message = json.dumps(message)
+
+        # Send to all connected clients
+        disconnected_clients = set()
+        for client in self.websocket_clients:
+            try:
+                await client.send(json_message)
+                print(f"✅ Sent to client: {client.remote_address}")
+            except Exception as e:
+                print(f"⚠️ Failed to send message to client: {e}")
+                disconnected_clients.add(client)
+
+        # Remove disconnected clients
+        for client in disconnected_clients:
+            self.websocket_clients.discard(client)
+
+    async def broadcast_screenshot(self, screenshot_b64: str, screenshot_type: str = "current"):
+        """Broadcast screenshot data to UI."""
+        await self.broadcast_event("screenshot_update", {
+            "screenshot_type": screenshot_type,
+            "screenshot_data": screenshot_b64,
+            "timestamp": asyncio.get_event_loop().time()
+        })
+
+    async def broadcast_ocr_results(self, ocr_results: List[Dict[str, Any]]):
+        """Broadcast OCR results to UI."""
+        await self.broadcast_event("ocr_update", {
+            "ocr_results": ocr_results,
+            "timestamp": asyncio.get_event_loop().time()
+        })
+
+    async def broadcast_grounding_call(self, model_name: str, instruction: str, coordinates: Optional[Tuple[int, int]], confidence: float, processing_time: float):
+        """Broadcast grounding model call results to UI."""
+        # Set grounding model as processing when starting, idle when complete
+        if coordinates is None:
+            # Starting grounding
+            await self.broadcast_event("agent_state", {
+                "orchestrator": "idle",
+                "programmer": "idle",
+                "gui_operator": "idle",
+                "grounding_model": "processing"
+            })
+        else:
+            # Grounding completed, set GUI operator back to processing
+            await self.broadcast_event("agent_state", {
+                "orchestrator": "idle",
+                "programmer": "idle",
+                "gui_operator": "processing",
+                "grounding_model": "idle"
+            })
+
+        await self.broadcast_event("grounding_update", {
+            "model_name": model_name,
+            "instruction": instruction,
+            "coordinates": coordinates,
+            "confidence": confidence,
+            "processing_time": processing_time,
+            "timestamp": asyncio.get_event_loop().time()
+        })
+
+    async def broadcast_function_call(self, agent_name: str, function_name: str, parameters: Dict[str, Any]):
+        """Broadcast function call details to UI."""
+        await self.broadcast_event("function_call_update", {
+            "agent_name": agent_name,
+            "function_name": function_name,
+            "parameters": parameters,
+            "timestamp": asyncio.get_event_loop().time()
+        })
+
+
+    def _extract_sub_agent_final_message(self, history: List[Dict[str, Any]]) -> str:
+        """Extract the final message from a sub-agent's conversation history."""
+        # Look for the last assistant message that doesn't contain function calls
+        for message in reversed(history):
+            if message.get("role") == "assistant":
+                content = message.get("content", "")
+                # Check if this message contains function calls
+                has_function_calls = False
+                if isinstance(content, list):
+                    for item in content:
+                        if item.get("type") == "tool_use" or item.get("type") == "function_call":
+                            has_function_calls = True
+                            break
+                elif "function_call" in str(content) or "tool_use" in str(content):
+                    has_function_calls = True
+
+                # If no function calls, this is the final completion message
+                if not has_function_calls and content:
+                    return str(content)
+
+        # Fallback: return the last message content
+        return "Sub-agent completed task (no explicit completion message found)"
 
     async def run(self, task: str):
         """Runs the CoAct-1 agent system on a given task."""
         print(f"\n🎬 [COACT-1 RUN] Starting task: '{task}'")
 
-        # Take initial screenshot for orchestrator context
-        print("📸 Taking initial screenshot for orchestrator...")
-        # Initialize the computer handler if needed
+        # Start WebSocket server for real-time updates
+        await self.start_websocket_server_async()
+
+        # Wait a moment for frontend to connect
+        await asyncio.sleep(2)
+
+        # Broadcast the original user task assigned to Orchestrator
+        print(f"📡 Broadcasting user_task_started: {task}")
+        await self.broadcast_event("user_task_started", {
+            "task": task,
+            "assigned_to": "Orchestrator"
+        })
+
+        # Set orchestrator as processing
+        await self.broadcast_event("agent_state", {
+            "orchestrator": "processing",
+            "programmer": "idle",
+            "gui_operator": "idle",
+            "grounding_model": "idle"
+        })
         if hasattr(self.orchestrator_tools._handler, '_initialize'):
             await self.orchestrator_tools._handler._initialize()
-        # Get the screenshot from the computer handler
-        initial_screenshot_b64 = await self.orchestrator_tools._handler.screenshot()
-        print("   ✅ Initial screenshot taken")
 
-        # Create initial user message with task and screenshot
-        initial_content = [
-            {"type": "text", "text": f"{task}\n\nHere is the current screen. What is the next subtask?"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{initial_screenshot_b64}"}}
-        ]
-
-        orchestrator_history: List[Dict[str, Any]] = [{"role": "user", "content": initial_content}]
+        orchestrator_history: List[Dict[str, Any]] = []
     
         for i in range(10): # Max 10 steps
             print(f"\n--- Step {i+1} ---")
 
-            # For subsequent steps, add a simple prompt (screenshots will come from sub-agent summaries)
-            orchestrator_history.append({
-                "role": "user",
-                "content": "What is the next subtask based on the current progress? (or you can call task_completed)"
-            })
+            # Take current screenshot for orchestrator context
+            print("📸 Taking current screenshot for orchestrator...")
+            try:
+                current_screenshot_b64 = await self.orchestrator_tools._handler.screenshot()
+                print("   ✅ Current screenshot taken")
+
+                # Broadcast current screenshot to UI
+                await self.broadcast_screenshot(current_screenshot_b64, "current")
+
+                orchestrator_history.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"{task}\n"},
+                        {"type": "text", "text": "What is the next subtask based on the current progress? (or you can call task_completed)"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_screenshot_b64}"}}
+                    ]
+                })
+            except Exception as e:
+                print(f"   ⚠️ Failed to take screenshot: {e}")
+                orchestrator_history.append({
+                    "role": "user",
+                    "content": "What is the next subtask based on the current progress? (or you can call task_completed)"
+                })
 
             # 2. Call Orchestrator
             print("🤔 Orchestrator is planning...")
@@ -518,60 +339,111 @@ class CoAct1:
 
             if tool_name == "task_completed":
                 print("✅ Task completed!")
+                # Set all agents to idle
+                await self.broadcast_event("agent_state", {
+                    "orchestrator": "idle",
+                    "programmer": "idle",
+                    "gui_operator": "idle",
+                    "grounding_model": "idle"
+                })
+                # Broadcast task completion event
+                await self.broadcast_event("task_completed", {
+                    "task": task,
+                    "step": i + 1
+                })
                 break
-            
+
             sub_agent = None
+            target_agent = ""
             if tool_name == "delegate_to_programmer":
                 print(f"👨‍💻 Delegating to Programmer: {subtask}")
                 sub_agent = self.programmer
+                target_agent = "Programmer"
+                # Set programmer as processing, others idle
+                await self.broadcast_event("agent_state", {
+                    "orchestrator": "idle",
+                    "programmer": "processing",
+                    "gui_operator": "idle",
+                    "grounding_model": "idle"
+                })
             elif tool_name == "delegate_to_gui_operator":
                 print(f"🖱️ Delegating to GUI Operator: {subtask}")
                 sub_agent = self.gui_operator
+                target_agent = "GUIOperator"
+                # Set GUI operator as processing, others idle
+                await self.broadcast_event("agent_state", {
+                    "orchestrator": "idle",
+                    "programmer": "idle",
+                    "gui_operator": "processing",
+                    "grounding_model": "idle"
+                })
             else:
                 print(f"❓ Unknown delegation: {tool_name}")
                 continue
 
-            # 3. Run sub-agent with the task and current image context
-            # Get the current screenshot from orchestrator history
-            current_image_b64 = get_last_image_b64(orchestrator_history)
+            # Broadcast task delegation event with the actual message sent to agent
+            delegation_message = f"{target_agent}: {subtask}"
+            print(f"🔄 Broadcasting task_delegated: {delegation_message} (step {i+1})")
 
-            # Create sub-agent history starting with the subtask
-            if current_image_b64:
-                # Include the image directly in the subtask message
-                sub_agent_history = [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"{subtask}\n\nHere is the current screen state:"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_image_b64}"}}
-                    ]
-                }]
-                print("   🖼️ Provided image context to sub-agent")
-            else:
-                sub_agent_history = [{
-                    "role": "user",
-                    "content": subtask
-                }]
+            await self.broadcast_event("task_delegated", {
+                "task_id": f"sub-{i+1}",
+                "description": delegation_message,
+                "assigned_to": target_agent,
+                "parent_task": task,
+                "step": i + 1
+            })
+            
+        
+            # Include the image directly in the subtask message
+            sub_agent_history = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"{subtask}\n\nHere is the current screen state:"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_screenshot_b64}"}}
+                ]
+            }]
+            print("   🖼️ Provided image context to sub-agent")
+           
 
             async for result in sub_agent.run(sub_agent_history):
                 sub_agent_history.extend(result.get("output", []))
 
-            # 4. Get the latest screenshot from the sub-agent's history for the summary
-            summary_screenshot_b64 = get_last_image_b64(sub_agent_history)
+            final_screenshot_b64 = await self.orchestrator_tools._handler.screenshot()
 
-            # 5. Summarize and update Orchestrator history
-            print("📝 Summarizing sub-task...")
-            summary = await self._summarize_interaction(sub_agent_history, summary_screenshot_b64)
-            print(f"Summary: {summary}")
+            # Broadcast final screenshot as previous screenshot for next iteration
+            await self.broadcast_screenshot(final_screenshot_b64, "previous")
 
-            # Create a message with both summary text and the final screenshot for orchestrator evaluation
+            # 5. Extract the sub-agent's final completion message
+            print("📝 Extracting sub-agent completion message...")
+            final_message = self._extract_sub_agent_final_message(sub_agent_history)
+            print(f"Final message: {final_message}")
+
+            # Set orchestrator back to processing for next iteration
+            await self.broadcast_event("agent_state", {
+                "orchestrator": "processing",
+                "programmer": "idle",
+                "gui_operator": "idle",
+                "grounding_model": "idle"
+            })
+
+            # Broadcast sub-agent completion event
+            await self.broadcast_event("subtask_completed", {
+                "task_id": f"sub-{i+1}",
+                "description": subtask,
+                "assigned_to": target_agent,
+                "result": final_message,
+                "step": i + 1
+            })
+
+            # Create a message with the sub-agent's final message and the current screenshot for orchestrator evaluation
             orchestrator_result_content = [
-                {"type": "text", "text": f"Sub-task completed. Summary: {summary}\n\nHere is the final screen state. Evaluate whether the sub-task was successful and determine the next action."}
+                {"type": "text", "text": f"Sub-agent completed task.\n\nFinal Message: {final_message}\n\nHere is the current screen state. Evaluate whether the sub-task was successful and determine the next action."}
             ]
 
-            if summary_screenshot_b64:
+            if final_screenshot_b64:
                 orchestrator_result_content.append({
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{summary_screenshot_b64}"}
+                    "image_url": {"url": f"data:image/png;base64,{final_screenshot_b64}"}
                 })
 
             orchestrator_history.append({
@@ -579,124 +451,3 @@ class CoAct1:
                 "call_id": delegation.get("call_id", f"call_{hash(str(delegation))}"),
                 "output": orchestrator_result_content,
             })
-
-    async def run_direct_gui(self, task: str):
-        """Runs the CoAct-1 system but directly delegates the task to the GUI Operator."""
-        print(f"\n🎬 [COACT-1 DIRECT GUI] Starting task: '{task}'")
-
-        # Take initial screenshot for GUI operator context
-        print("📸 Taking initial screenshot for GUI operator...")
-        # Initialize the computer handler if needed
-        if hasattr(self.orchestrator_tools._handler, '_initialize'):
-            await self.orchestrator_tools._handler._initialize()
-        # Get the screenshot from the computer handler
-        initial_screenshot_b64 = await self.orchestrator_tools._handler.screenshot()
-        print("   ✅ Initial screenshot taken")
-
-        orchestrator_history: List[Dict[str, Any]] = [{"role": "user", "content": task}]
-
-        print("🎭 [DIRECT GUI] Delegating directly to GUI Operator...")
-
-        # 1. Add prompt for direct GUI task
-        orchestrator_history.append({
-            "role": "user",
-            "content": f"Direct GUI task: {task}"
-        })
-
-        # 2. Instead of Orchestrator → directly delegate to GUI Operator
-        subtask = "Double click on the Firefox web browser icon on the screen."
-        print(f"🖱️ Directly delegating to GUI Operator: {subtask}")
-
-        sub_agent = self.gui_operator
-
-        # Create sub-agent history with image context
-        if initial_screenshot_b64:
-            sub_agent_history = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"{subtask}\n\nHere is the current screen state:"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{initial_screenshot_b64}"}}
-                ]
-            }]
-            print("   🖼️ Provided image context to GUI operator")
-        else:
-            sub_agent_history = [{
-                "role": "user",
-                "content": subtask
-            }]
-
-        # 3. Run the GUI Operator
-        async for result in sub_agent.run(sub_agent_history):
-            sub_agent_history.extend(result.get("output", []))
-
-        # 4. Get the latest screenshot
-        summary_screenshot_b64 = get_last_image_b64(sub_agent_history)
-
-        # 5. Summarize
-        print("📝 Summarizing GUI Operator sub-task...")
-        summary = await self._summarize_interaction(sub_agent_history, summary_screenshot_b64)
-        print(f"Summary: {summary}")
-
-        orchestrator_history.append({
-            "type": "function_call_output",
-            "output": summary,
-        })
-
-        print("✅ Direct GUI task completed!")
-    
-
-
-async def main():
-    """Main function to run the CoAct-1 example."""
-    print("🚀 Starting CoAct-1 Example")
-    print("=" * 60)
-
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Run CoAct-1 Multi-Agent System')
-    parser.add_argument('-m', '--message', type=str, required=True,
-                       help='The user message/task to execute')
-    args = parser.parse_args()
-
-    if not os.getenv("GOOGLE_API_KEY"):
-        print("❌ Error: GOOGLE_API_KEY environment variable not set.")
-        return
-
-    computer_instance = None
-    try:
-        print("📦 Setting up Docker computer...")
-        computer_instance = Computer(
-            os_type="linux",
-            provider_type=VMProviderType.DOCKER,
-            name="cua-coact1-demo",
-            image="trycua/cua-ubuntu:latest",
-        )
-        await computer_instance.run()
-
-        # Define model names for each agent
-        orchestrator_model_name = "gemini/gemini-2.5-flash"
-        programmer_model_name = "gemini/gemini-2.5-flash"
-        gui_operator_model_name = "huggingface-local/OpenGVLab/InternVL3_5-4B+gemini/gemini-2.5-flash"
-
-        coact_system = CoAct1(
-            computer=computer_instance,
-            orchestrator_model=orchestrator_model_name,
-            programmer_model=programmer_model_name,
-            gui_operator_model=gui_operator_model_name,
-        )
-
-        # Use the task from command line arguments
-        task = args.message
-        print(f"🎯 Task: {task}")
-
-        await coact_system.run(task)
-
-    except Exception as e:
-        logger.error(f"❌ Error running example: {e}")
-        raise
-    finally:
-        if computer_instance:
-            # await computer_instance.stop()
-            print("\n🧹 Computer connection closed")
-
-if __name__ == "__main__":
-    asyncio.run(main())

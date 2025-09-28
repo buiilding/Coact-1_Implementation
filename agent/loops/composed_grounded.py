@@ -28,7 +28,7 @@ GROUNDED_COMPUTER_TOOL_SCHEMA = {
   "type": "function",
   "function": {
     "name": "computer",
-    "description": "Control a computer by taking screenshots and interacting with UI elements. This tool uses element descriptions to locate and interact with UI elements on the screen (e.g., 'red submit button', 'search text field', 'hamburger menu icon', 'close button in top right corner').",
+    "description": "Control a computer by taking screenshots and performing actions. Some actions like click, scroll, and move require element descriptions to locate UI elements on screen (e.g., 'red submit button', 'search text field'). Other actions like type work on the currently focused element.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -52,7 +52,7 @@ GROUNDED_COMPUTER_TOOL_SCHEMA = {
         },
         "element_description": {
             "type": "string",
-            "description": "Description of the element to interact with (required for click, double_click, move, scroll actions)"
+            "description": "Description of the UI element to interact with (only used for click, double_click, move, scroll, drag actions)"
         },
         "start_element_description": {
             "type": "string",
@@ -165,10 +165,11 @@ class ComposedGroundedConfig(AsyncAgentConfig):
     e.g., "huggingface-local/HelloKKMe/GTA1-7B+gemini/gemini-1.5-pro"
     """
 
-    def __init__(self):
+    def __init__(self, grounding_broadcast_callback=None):
         self.desc2xy: Dict[str, Tuple[float, float]] = {}
         self.grounding_agents: Dict[str, Any] = {}
         self.last_before_image: Optional[str] = None  # Store image before last action
+        self.grounding_broadcast_callback = grounding_broadcast_callback
     
     async def predict_step(
         self,
@@ -183,11 +184,12 @@ class ComposedGroundedConfig(AsyncAgentConfig):
         _on_api_end=None,
         _on_usage=None,
         _on_screenshot=None,
+        grounding_broadcast_callback=None,
         **kwargs
     ) -> Dict[str, Any]:
         """
         Composed-grounded predict step implementation.
-        
+
         Process:
         0. Store last computer call image, if none then take a screenshot
         1. Convert computer calls from xy to descriptions
@@ -198,6 +200,9 @@ class ComposedGroundedConfig(AsyncAgentConfig):
         6. Convert computer calls from descriptions back to xy coordinates
         7. Return output and usage
         """
+        # Update grounding broadcast callback if provided
+        if grounding_broadcast_callback is not None:
+            self.grounding_broadcast_callback = grounding_broadcast_callback
         # Parse the composed model
         if "+" not in model:
             raise ValueError(f"Composed model must be in format 'grounding_model+thinking_model', got: {model}")
@@ -306,7 +311,9 @@ class ComposedGroundedConfig(AsyncAgentConfig):
         for i, msg in enumerate(completion_messages):
             role = msg.get("role", "")
             content = msg.get("content", "")
-            print(f"   Message {i}: role={role}")
+            is_final_message = (i == len(completion_messages) - 1 and role == "user")
+            message_prefix = "🎯 FINAL MESSAGE TO LLM" if is_final_message else f"   Message {i}"
+            print(f"   {message_prefix}: role={role}")
 
             if role == "user":
                 if isinstance(content, list):
@@ -315,7 +322,17 @@ class ComposedGroundedConfig(AsyncAgentConfig):
                     for item in content:
                         if item.get("type") == "text":
                             has_text = True
-                            print(f"     📝 Text: {item['text'][:100]}{'...' if len(item['text']) > 100 else ''}")
+                            text_content = item['text']
+                            # Show more text for debugging, especially OCR and latest messages
+                            if "OCR-DETECTED TEXT ELEMENTS:" in text_content:
+                                # Show full OCR content
+                                print(f"     📝 OCR Text: {text_content}")
+                            elif len(text_content) > 500:
+                                # For long messages, show more content
+                                print(f"     📝 Text: {text_content[:500]}... (showing first 500 chars)")
+                            else:
+                                # For shorter messages, show full content
+                                print(f"     📝 Text: {text_content}")
                         elif item.get("type") == "image_url":
                             image_count += 1
                             print("     🖼️  Image present")
@@ -369,14 +386,16 @@ class ComposedGroundedConfig(AsyncAgentConfig):
 
             # Get or create cached grounding agent
             if grounding_model not in self.grounding_agents:
-                grounding_agent_conf = find_agent_config(grounding_model)
-                if grounding_agent_conf:
-                    self.grounding_agents[grounding_model] = grounding_agent_conf.agent_class()
-                    print(f"   Instantiated grounding agent: {grounding_agent_conf.agent_class.__name__}")
-                else:
-                    self.grounding_agents[grounding_model] = None
-            
-            grounding_agent = self.grounding_agents.get(grounding_model)
+                from ..agent import ComputerAgent
+                grounding_agent = ComputerAgent(
+                    model=grounding_model,
+                    grounding_broadcast_callback=self.grounding_broadcast_callback,
+                    trust_remote_code=True
+                )
+                self.grounding_agents[grounding_model] = grounding_agent
+                print(f"   Instantiated grounding agent: ComputerAgent with {grounding_model}")
+            else:
+                grounding_agent = self.grounding_agents.get(grounding_model)
 
             if grounding_agent:
                 print(f"   Using grounding agent: {grounding_agent.__class__.__name__}")
@@ -395,10 +414,8 @@ class ComposedGroundedConfig(AsyncAgentConfig):
                             print(f"     📍 Enhanced instruction with failed coords: {enhanced_instruction}")
                         
                         coords = await grounding_agent.predict_click(
-                            model=grounding_model,
-                            image_b64=last_image_b64,
                             instruction=enhanced_instruction,
-                            **kwargs
+                            image_b64=last_image_b64
                         )
                         if coords:
                             self.desc2xy[desc] = coords
@@ -426,29 +443,33 @@ class ComposedGroundedConfig(AsyncAgentConfig):
         model: str,
         image_b64: str,
         instruction: str,
+        grounding_broadcast_callback=None,
         **kwargs
     ) -> Optional[Tuple[int, int]]:
         """
         Predict click coordinates using the grounding model.
-        
+
         For composed models, uses only the grounding model part for click prediction.
         """
         # Parse the composed model to get grounding model
         if "+" not in model:
             raise ValueError(f"Composed model must be in format 'grounding_model+thinking_model', got: {model}")
         grounding_model, thinking_model = model.split("+", 1)
-        
+
         # Find and use the grounding agent
         grounding_agent_conf = find_agent_config(grounding_model)
         if grounding_agent_conf:
-            grounding_agent = grounding_agent_conf.agent_class()
-            return await grounding_agent.predict_click(
+            # Create a ComputerAgent instance with the grounding broadcast callback
+            from ..agent import ComputerAgent
+            grounding_agent = ComputerAgent(
                 model=grounding_model,
-                image_b64=image_b64,
-                instruction=instruction,
-                **kwargs
+                grounding_broadcast_callback=grounding_broadcast_callback
             )
-        
+            return await grounding_agent.predict_click(
+                instruction=instruction,
+                image_b64=image_b64
+            )
+
         return None
     
     def get_capabilities(self) -> List[AgentCapability]:

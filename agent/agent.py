@@ -172,11 +172,13 @@ class ComputerAgent:
         max_trajectory_budget: Optional[float | dict] = None,
         telemetry_enabled: Optional[bool] = True,
         trust_remote_code: Optional[bool] = False,
+        grounding_broadcast_callback: Optional[Callable] = None,
+        function_call_broadcast_callback: Optional[Callable] = None,
         **kwargs
     ):
         """
         Initialize ComputerAgent.
-        
+
         Args:
             model: Model name (e.g., "claude-3-5-sonnet-20241022", "computer-use-preview", "omni+vertex_ai/gemini-pro")
             tools: List of tools (computer objects, decorated functions, etc.)
@@ -192,6 +194,8 @@ class ComputerAgent:
             max_trajectory_budget: If set, adds BudgetManagerCallback to track usage costs and stop when budget is exceeded
             telemetry_enabled: If set, adds TelemetryCallback to track anonymized usage data. Enabled by default.
             trust_remote_code: If set, trust remote code when loading local models. Disabled by default.
+            grounding_broadcast_callback: Optional callback function to broadcast grounding model calls
+            function_call_broadcast_callback: Optional callback function to broadcast function calls
             **kwargs: Additional arguments passed to the agent loop
         """        
         # If the loop is "human/human", we need to prefix a grounding model fallback
@@ -212,6 +216,8 @@ class ComputerAgent:
         self.telemetry_enabled = telemetry_enabled
         self.kwargs = kwargs
         self.trust_remote_code = trust_remote_code
+        self.grounding_broadcast_callback = grounding_broadcast_callback
+        self.function_call_broadcast_callback = function_call_broadcast_callback
 
         # == Add built-in callbacks ==
 
@@ -477,6 +483,18 @@ class ComputerAgent:
                 if not computer:
                     raise ValueError("Computer handler is required for computer calls")
 
+                # Broadcast computer call
+                if self.function_call_broadcast_callback:
+                    action = item.get("action", {})
+                    action_type = action.get("type", "unknown")
+                    # Extract action arguments (all fields except 'type')
+                    action_args = {k: v for k, v in action.items() if k != "type"}
+                    await self.function_call_broadcast_callback(
+                        agent_name=self.model,  # Use model name as agent identifier
+                        function_name=f"computer.{action_type}",  # Prefix with computer. to distinguish
+                        parameters=action_args
+                    )
+
                 # Perform computer actions
                 action = item.get("action")
                 action_type = action.get("type")
@@ -590,6 +608,14 @@ class ComputerAgent:
                 function_name = function_info.get("name")
                 function_args = function_info.get("arguments", {})
 
+                # Broadcast function call
+                if self.function_call_broadcast_callback:
+                    await self.function_call_broadcast_callback(
+                        agent_name=self.model,  # Use model name as agent identifier
+                        function_name=function_name,
+                        parameters=function_args
+                    )
+
                 function = self._get_tool(function_name)
                 if not function:
                     raise ToolError(f"Function {function_name} not found")
@@ -608,14 +634,20 @@ class ComputerAgent:
                     result = await function(**args)
                 else:
                     result = await asyncio.to_thread(function, **args)
-            
+
+                # Take screenshot after GUI function calls (for agents with screenshot_delay)
+                if self.screenshot_delay and self.screenshot_delay > 0 and computer:
+                    await asyncio.sleep(self.screenshot_delay)
+                    screenshot_base64 = await computer.screenshot()
+                    await self._on_screenshot(screenshot_base64, "screenshot_after_function")
+
                 # Create function call output
                 call_output = {
                     "type": "function_call_output",
                     "call_id": item.get("call_id"),
                     "output": str(result),
                 }
-            
+
                 result = [call_output]
                 await self._on_function_call_end(item, result)
                 return result
@@ -706,6 +738,7 @@ class ComputerAgent:
                 _on_api_end=self._on_api_end,
                 _on_usage=self._on_usage,
                 _on_screenshot=self._on_screenshot,
+                grounding_broadcast_callback=self.grounding_broadcast_callback,
             )
             result = get_json(result)
             
@@ -777,17 +810,42 @@ class ComputerAgent:
 
             print(f"   🖼️  Image provided to model")
 
+            # Broadcast grounding model call start
+            if self.grounding_broadcast_callback:
+                await self.grounding_broadcast_callback(
+                    model_name=self.model,
+                    instruction=instruction,
+                    coordinates=None,
+                    confidence=0.0,
+                    processing_time=0.0
+                )
+
+            start_time = asyncio.get_event_loop().time()
             coordinates = await self.agent_loop.predict_click(
                 model=self.model,
                 image_b64=image_b64,
-                instruction=instruction
+                instruction=instruction,
+                grounding_broadcast_callback=self.grounding_broadcast_callback
             )
+            processing_time = asyncio.get_event_loop().time() - start_time
 
             # Log the result
             if coordinates:
                 print(f"✅ [CLICK PREDICTION] Success: ({coordinates[0]}, {coordinates[1]})")
+                confidence = 0.9  # Default confidence since most models don't provide this
             else:
                 print("❌ [CLICK PREDICTION] Failed to predict coordinates")
+                confidence = 0.0
+
+            # Broadcast grounding model result
+            if self.grounding_broadcast_callback:
+                await self.grounding_broadcast_callback(
+                    model_name=self.model,
+                    instruction=instruction,
+                    coordinates=coordinates,
+                    confidence=confidence,
+                    processing_time=processing_time
+                )
 
             return coordinates
         return None

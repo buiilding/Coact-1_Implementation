@@ -308,17 +308,20 @@ class GenericConfig(AsyncAgentConfig):
         }
 
         # Call the model
+        response = None
         try:
             if _on_api_start:
                 await _on_api_start(api_kwargs)
-            
+
             print(f"🤖 [GENERIC AGENT: {model}] Making API call with {len(api_messages)} messages")
 
             # Log the input to the generic agent - show all messages for debugging
             for i, msg in enumerate(api_messages):
                 role = msg.get("role", "")
                 content = msg.get("content", "")
-                print(f"   Message {i}: role={role}")
+                is_final_message = (i == len(api_messages) - 1 and role == "user")
+                message_prefix = "🎯 FINAL MESSAGE TO LLM" if is_final_message else f"   Message {i}"
+                print(f"   {message_prefix}: role={role}")
 
                 if role == "user":
                     if isinstance(content, list):
@@ -327,7 +330,17 @@ class GenericConfig(AsyncAgentConfig):
                         for item in content:
                             if item.get("type") == "text":
                                 has_text = True
-                                print(f"     📝 Text: {item['text'][:100]}{'...' if len(item['text']) > 100 else ''}")
+                                text_content = item['text']
+                                # Show more text for debugging, especially OCR and latest messages
+                                if "OCR-DETECTED TEXT ELEMENTS:" in text_content:
+                                    # Show full OCR content
+                                    print(f"     📝 OCR Text: {text_content}")
+                                elif len(text_content) > 500:
+                                    # For long messages, show more content
+                                    print(f"     📝 Text: {text_content[:500]}... (showing first 500 chars)")
+                                else:
+                                    # For shorter messages, show full content
+                                    print(f"     📝 Text: {text_content}")
                             elif item.get("type") == "image_url":
                                 image_count += 1
                                 print("     🖼️  Image present")
