@@ -10,3 +10,6 @@ opencv-python-headless
 ctransformers
 einops
 timm
+rapidocr
+pyautogui
+screeninfo

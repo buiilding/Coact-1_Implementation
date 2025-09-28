@@ -308,10 +308,11 @@ class GenericConfig(AsyncAgentConfig):
         }
 
         # Call the model
+        response = None
         try:
             if _on_api_start:
                 await _on_api_start(api_kwargs)
-            
+
             print(f"🤖 [GENERIC AGENT: {model}] Making API call with {len(api_messages)} messages")
 
             # Log the input to the generic agent - show all messages for debugging
