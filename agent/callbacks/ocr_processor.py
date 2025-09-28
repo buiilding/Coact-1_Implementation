@@ -182,6 +182,7 @@ class OCRProcessorCallback(AsyncCallbackHandler):
     def _inject_ocr_into_messages(self, messages: List[Dict[str, Any]], ocr_text: str) -> List[Dict[str, Any]]:
         """
         Inject OCR text into the first user message, placing it after the latest image.
+        Removes any existing OCR text from previous messages to avoid accumulation.
 
         Args:
             messages: Original messages
@@ -194,23 +195,63 @@ class OCRProcessorCallback(AsyncCallbackHandler):
 
         for message in messages:
             if message.get("role") == "user" and isinstance(message.get("content"), list):
-                # Count total images in the message
-                total_images = sum(1 for item in message["content"] if item.get("type") == "image_url")
+                # First, clean out any existing OCR text from this message
+                cleaned_content = []
+                for content_item in message["content"]:
+                    if content_item.get("type") == "text":
+                        text = content_item.get("text", "")
+                        # Remove any existing OCR-DETECTED TEXT ELEMENTS sections
+                        if "OCR-DETECTED TEXT ELEMENTS:" in text:
+                            # Split by the OCR section and keep only the part before it
+                            parts = text.split("OCR-DETECTED TEXT ELEMENTS:")
+                            if len(parts) > 1:
+                                # Keep text before OCR section and any text after (but remove the OCR part)
+                                before_ocr = parts[0].strip()
+                                after_ocr_parts = parts[1].split("\n\n", 1)
+                                if len(after_ocr_parts) > 1:
+                                    after_ocr = after_ocr_parts[1].strip()
+                                    if before_ocr and after_ocr:
+                                        cleaned_content.append({
+                                            "type": "text",
+                                            "text": f"{before_ocr}\n\n{after_ocr}"
+                                        })
+                                    elif before_ocr:
+                                        cleaned_content.append({
+                                            "type": "text",
+                                            "text": before_ocr
+                                        })
+                                    elif after_ocr:
+                                        cleaned_content.append({
+                                            "type": "text",
+                                            "text": after_ocr
+                                        })
+                                elif before_ocr:
+                                    cleaned_content.append({
+                                        "type": "text",
+                                        "text": before_ocr
+                                    })
+                        else:
+                            cleaned_content.append(content_item)
+                    else:
+                        cleaned_content.append(content_item)
 
-                new_content = []
+                # Now inject new OCR text after the latest image
+                total_images = sum(1 for item in cleaned_content if item.get("type") == "image_url")
+
+                final_content = []
                 ocr_injected = False
                 images_seen = 0
 
-                # Process content items, injecting OCR after the last image
-                for content_item in message["content"]:
-                    new_content.append(content_item)
+                # Process cleaned content items, injecting OCR after the last image
+                for content_item in cleaned_content:
+                    final_content.append(content_item)
 
                     if content_item.get("type") == "image_url":
                         images_seen += 1
 
                         # If this is the last image and we haven't injected OCR yet, inject it after
                         if images_seen == total_images and not ocr_injected:
-                            new_content.append({
+                            final_content.append({
                                 "type": "text",
                                 "text": f"\n{ocr_text}\n"
                             })
@@ -219,9 +260,9 @@ class OCRProcessorCallback(AsyncCallbackHandler):
                 # If no images found, inject at the beginning (fallback for initial messages)
                 if not ocr_injected:
                     # Find first text item and prepend OCR
-                    for i, content_item in enumerate(new_content):
+                    for i, content_item in enumerate(final_content):
                         if content_item.get("type") == "text":
-                            new_content[i] = {
+                            final_content[i] = {
                                 "type": "text",
                                 "text": f"{ocr_text}\n\n{content_item['text']}"
                             }
@@ -229,7 +270,7 @@ class OCRProcessorCallback(AsyncCallbackHandler):
                             break
 
                 modified_message = message.copy()
-                modified_message["content"] = new_content
+                modified_message["content"] = final_content
                 modified_messages.append(modified_message)
             else:
                 modified_messages.append(message)

@@ -149,5 +149,6 @@ def create_gui_operator(gui_operator_model: str, gui_operator_computer: Computer
         instructions=instructions,
         verbosity=logging.WARNING,
         trust_remote_code=True,
+        only_n_most_recent_images=4,
         screenshot_delay=1.0,  # Wait 1 second after actions before screenshot
     )

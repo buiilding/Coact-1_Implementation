@@ -24,7 +24,6 @@ from computer import Computer, VMProviderType
 # from agent.callbacks import AsyncCallbackHandler
 # from agent.computers.base import AsyncComputerHandler
 from agent.computers.cua import cuaComputerHandler
-import litellm
 
 # Import agent modules
 from orchestrator import OrchestratorTools, create_orchestrator
@@ -69,49 +68,28 @@ class CoAct1:
         print("✅ [COACT-1] All agents initialized successfully!")
 
 
-    async def _summarize_interaction(self, history: List[Dict[str, Any]], screenshot_b64: str) -> str:
-        """Summarizes a sub-agent's conversation history."""
-        prompt = "Please summarize the following interaction history in one sentence for the Orchestrator. The user's request is at the beginning, followed by the agent's actions. The final screenshot shows the result of the actions."
-        
-        # Filter out screenshots from the history to reduce token count
-        filtered_history = []
-        image_count = 0
-        for item in history:
-            if "image_url" not in json.dumps(item):
-                filtered_history.append(item)
-            else:
-                image_count += 1
+    def _extract_sub_agent_final_message(self, history: List[Dict[str, Any]]) -> str:
+        """Extract the final message from a sub-agent's conversation history."""
+        # Look for the last assistant message that doesn't contain function calls
+        for message in reversed(history):
+            if message.get("role") == "assistant":
+                content = message.get("content", "")
+                # Check if this message contains function calls
+                has_function_calls = False
+                if isinstance(content, list):
+                    for item in content:
+                        if item.get("type") == "tool_use" or item.get("type") == "function_call":
+                            has_function_calls = True
+                            break
+                elif "function_call" in str(content) or "tool_use" in str(content):
+                    has_function_calls = True
 
-        # Debug: Print details about the input before summarization
-        print(f"📊 Summarization input details:")
-        print(f"   📝 Total history items: {len(history)}")
-        print(f"   🖼️  Images in history: {image_count}")
-        print(f"   📄 Filtered history items: {len(filtered_history)}")
-        print(f"   📸 Screenshot provided: {'Yes' if screenshot_b64 else 'No'}")
-        print(f"   📝 Full text input:")
-        print(f"   {json.dumps(filtered_history, indent=2)}")
+                # If no function calls, this is the final completion message
+                if not has_function_calls and content:
+                    return str(content)
 
-        content = [{"type": "text", "text": f"{prompt}\n\nHistory:\n{json.dumps(filtered_history, indent=2)}"}]
-
-        if screenshot_b64:
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}})
-
-        summary_messages = [{
-            "role": "user",
-            "content": content
-        }]
-
-        response = None
-        try:
-            response = await litellm.acompletion(
-                model="gemini/gemini-2.5-flash",
-                messages=summary_messages,
-            )
-            summary = response.choices[0].message.content or "No summary available."
-            return summary.strip()
-        except Exception as e:
-            logger.error(f"Error during summarization: {e}")
-            return f"Could not summarize the interaction: {e}"
+        # Fallback: return the last message content
+        return "Sub-agent completed task (no explicit completion message found)"
 
     async def run(self, task: str):
         """Runs the CoAct-1 agent system on a given task."""
@@ -137,11 +115,25 @@ class CoAct1:
         for i in range(10): # Max 10 steps
             print(f"\n--- Step {i+1} ---")
 
-            # For subsequent steps, add a simple prompt (screenshots will come from sub-agent summaries)
-            orchestrator_history.append({
-                "role": "user",
-                "content": "What is the next subtask based on the current progress? (or you can call task_completed)"
-            })
+            # Take current screenshot for orchestrator context
+            print("📸 Taking current screenshot for orchestrator...")
+            try:
+                current_screenshot_b64 = await self.orchestrator_tools._handler.screenshot()
+                print("   ✅ Current screenshot taken")
+
+                orchestrator_history.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is the next subtask based on the current progress? (or you can call task_completed)"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_screenshot_b64}"}}
+                    ]
+                })
+            except Exception as e:
+                print(f"   ⚠️ Failed to take screenshot: {e}")
+                orchestrator_history.append({
+                    "role": "user",
+                    "content": "What is the next subtask based on the current progress? (or you can call task_completed)"
+                })
 
             # 2. Call Orchestrator
             print("🤔 Orchestrator is planning...")
@@ -207,23 +199,23 @@ class CoAct1:
             async for result in sub_agent.run(sub_agent_history):
                 sub_agent_history.extend(result.get("output", []))
 
-            # 4. Get the latest screenshot from the sub-agent's history for the summary
-            summary_screenshot_b64 = get_last_image_b64(sub_agent_history)
+            # 4. Get the latest screenshot from the sub-agent's history
+            final_screenshot_b64 = get_last_image_b64(sub_agent_history)
 
-            # 5. Summarize and update Orchestrator history
-            print("📝 Summarizing sub-task...")
-            summary = await self._summarize_interaction(sub_agent_history, summary_screenshot_b64)
-            print(f"Summary: {summary}")
+            # 5. Extract the sub-agent's final completion message
+            print("📝 Extracting sub-agent completion message...")
+            final_message = self._extract_sub_agent_final_message(sub_agent_history)
+            print(f"Final message: {final_message}")
 
-            # Create a message with both summary text and the final screenshot for orchestrator evaluation
+            # Create a message with the sub-agent's final message and the current screenshot for orchestrator evaluation
             orchestrator_result_content = [
-                {"type": "text", "text": f"Sub-task completed. Summary: {summary}\n\nHere is the final screen state. Evaluate whether the sub-task was successful and determine the next action."}
+                {"type": "text", "text": f"Sub-agent completed task.\n\nFinal Message: {final_message}\n\nHere is the current screen state. Evaluate whether the sub-task was successful and determine the next action."}
             ]
 
-            if summary_screenshot_b64:
+            if final_screenshot_b64:
                 orchestrator_result_content.append({
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{summary_screenshot_b64}"}
+                    "image_url": {"url": f"data:image/png;base64,{final_screenshot_b64}"}
                 })
 
             orchestrator_history.append({
