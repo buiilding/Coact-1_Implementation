@@ -53,7 +53,7 @@ def task_completed():
     pass
 
 
-def create_orchestrator(orchestrator_model: str, orchestrator_tools: OrchestratorTools) -> ComputerAgent:
+def create_orchestrator(orchestrator_model: str, orchestrator_tools: OrchestratorTools, function_call_broadcast_callback=None) -> ComputerAgent:
     """Creates and configures the Orchestrator agent."""
     instructions = open("agent_prompts/Orchestrator.txt", "r").read()
 
@@ -72,6 +72,7 @@ def create_orchestrator(orchestrator_model: str, orchestrator_tools: Orchestrato
     return ComputerAgent(
         model=orchestrator_model,
         tools=orchestrator_tool_methods,
+        function_call_broadcast_callback=function_call_broadcast_callback,
         instructions=instructions,
         verbosity=logging.WARNING
     )

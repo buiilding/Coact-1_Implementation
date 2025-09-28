@@ -74,16 +74,18 @@ class OCRProcessorCallback(AsyncCallbackHandler):
     text element clicking.
     """
 
-    def __init__(self, device: str = "cpu"):
+    def __init__(self, device: str = "cpu", broadcast_callback=None):
         """
         Initialize OCR processor callback.
 
         Args:
             device: Device for OCR engine ("cpu" or "cuda")
+            broadcast_callback: Optional callback function to broadcast OCR results
         """
         self.device = device
         self.ocr_engine = None
         self.ocr_results = {}  # Map OCR ID -> (content, bbox)
+        self.broadcast_callback = broadcast_callback
 
     async def _initialize_ocr_engine(self):
         """Lazy initialization of OCR engine."""
@@ -297,6 +299,24 @@ class OCRProcessorCallback(AsyncCallbackHandler):
         print("🔍 Performing OCR on screenshot...")
         self.ocr_results = await self._perform_ocr(screenshot)
         print(f"✅ OCR completed: found {len(self.ocr_results)} text elements")
+
+        # Broadcast OCR results to UI if callback provided
+        if self.broadcast_callback:
+            ocr_results_list = []
+            for ocr_id, (content, bbox) in self.ocr_results.items():
+                x1, y1, x2, y2 = bbox
+                ocr_results_list.append({
+                    "id": str(ocr_id),
+                    "text": content,
+                    "confidence": 0.9,  # Default confidence since RapidOCR doesn't provide per-text confidence
+                    "bbox": {
+                        "x": x1,
+                        "y": y1,
+                        "width": x2 - x1,
+                        "height": y2 - y1
+                    }
+                })
+            await self.broadcast_callback(ocr_results_list)
 
         # Format OCR results for LLM
         ocr_text = self._format_ocr_text()

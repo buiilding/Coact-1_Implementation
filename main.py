@@ -42,6 +42,7 @@ async def main():
             provider_type=VMProviderType.DOCKER,
             name="cua-coact1-demo",
             image="trycua/cua-ubuntu:latest",
+            port=6091,
         )
         await computer_instance.run()
 
@@ -55,6 +56,7 @@ async def main():
             orchestrator_model=orchestrator_model_name,
             programmer_model=programmer_model_name,
             gui_operator_model=gui_operator_model_name,
+            websocket_port=8765,
         )
 
         # Use the task from command line arguments
@@ -68,8 +70,15 @@ async def main():
         raise
     finally:
         if computer_instance:
-            # await computer_instance.stop()
+            await computer_instance.stop()
             print("\n🧹 Computer connection closed")
+
+        # Clean up CoAct-1 WebSocket server
+        if 'coact_system' in locals() and coact_system:
+            try:
+                await coact_system.stop_websocket_server()
+            except Exception as e:
+                print(f"⚠️ Error stopping WebSocket server: {e}")
 
 
 if __name__ == "__main__":

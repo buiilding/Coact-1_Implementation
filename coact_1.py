@@ -16,7 +16,9 @@ import os
 import sys
 import logging
 import json
-from typing import List, Dict, Any, Optional
+import websockets
+import functools
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 # Import CUA components
 from agent import ComputerAgent
@@ -40,13 +42,18 @@ class CoAct1:
     """
     Implements the CoAct-1 multi-agent system.
     """
-    def __init__(self, computer: Computer, orchestrator_model: str, programmer_model: str, gui_operator_model: str):
+    def __init__(self, computer: Computer, orchestrator_model: str, programmer_model: str, gui_operator_model: str, websocket_port: int = 8765):
         self.computer = computer
-        
+
         # Store model names
         self.orchestrator_model = orchestrator_model
         self.programmer_model = programmer_model
         self.gui_operator_model = gui_operator_model
+
+        # WebSocket server for real-time updates
+        self.websocket_port = websocket_port
+        self.websocket_clients: Set[websockets.WebSocketServerProtocol] = set()
+        self.websocket_server = None
 
         # The cuaComputerHandler is the component that translates agent actions
         # into calls on the computer interface. We can reuse it.
@@ -61,11 +68,169 @@ class CoAct1:
         self.orchestrator_tools = OrchestratorTools(computer_handler)
         self.programmer_tools = ProgrammerTools(computer)
 
-        self.orchestrator = create_orchestrator(orchestrator_model, self.orchestrator_tools)
-        self.programmer = create_programmer(programmer_model, self.programmer_tools)
-        self.gui_operator = create_gui_operator(gui_operator_model, computer)
+        self.orchestrator = create_orchestrator(orchestrator_model, self.orchestrator_tools, self.broadcast_function_call)
+        self.programmer = create_programmer(programmer_model, self.programmer_tools, self.broadcast_screenshot, self.broadcast_function_call)
+        self.gui_operator = create_gui_operator(
+            gui_operator_model,
+            computer,
+            self.broadcast_ocr_results,
+            self.broadcast_grounding_call,
+            self.broadcast_function_call,
+            self.broadcast_screenshot
+        )
 
         print("✅ [COACT-1] All agents initialized successfully!")
+
+        # Start WebSocket server for real-time updates
+        self.start_websocket_server()
+
+    async def websocket_handler(self, websocket):
+        """Handle WebSocket connections for real-time updates."""
+        print(f"📡 New WebSocket connection from {websocket.remote_address}")
+        self.websocket_clients.add(websocket)
+        try:
+            await websocket.wait_closed()
+        finally:
+            self.websocket_clients.remove(websocket)
+            print(f"📡 WebSocket connection closed for {websocket.remote_address}")
+
+            # Broadcast UI reset when connection is lost
+            if not self.websocket_clients:  # Only reset if no clients remain
+                await self.broadcast_event("ui_reset", {
+                    "reason": "websocket_disconnected",
+                    "message": "Connection lost - resetting UI to initial state",
+                    "timestamp": asyncio.get_event_loop().time()
+                })
+                print("🔄 Broadcasted UI reset due to WebSocket disconnection")
+
+    def start_websocket_server(self):
+        """Initialize the WebSocket server for real-time updates."""
+        print(f"🚀 Initializing WebSocket server on port {self.websocket_port}")
+
+        # Use functools.partial to bind the instance method
+        handler = functools.partial(self.websocket_handler)
+
+        self.websocket_server = websockets.serve(
+            handler,
+            "localhost",
+            self.websocket_port
+        )
+
+    async def start_websocket_server_async(self):
+        """Start the WebSocket server asynchronously."""
+        if self.websocket_server:
+            # Start the WebSocket server
+            await self.websocket_server.__aenter__()
+            print(f"✅ WebSocket server started on port {self.websocket_port}")
+
+    async def stop_websocket_server(self):
+        """Stop the WebSocket server."""
+        if self.websocket_server:
+            try:
+                await self.websocket_server.__aexit__(None, None, None)
+            except Exception as e:
+                print(f"⚠️ Error stopping WebSocket server: {e}")
+
+        # Broadcast UI reset before closing connections
+        await self.broadcast_event("ui_reset", {
+            "reason": "server_shutdown",
+            "message": "Server shutting down - resetting UI to initial state",
+            "timestamp": asyncio.get_event_loop().time()
+        })
+        print("🔄 Broadcasted UI reset due to server shutdown")
+
+        # Close all client connections
+        for client in self.websocket_clients.copy():
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+        self.websocket_clients.clear()
+        print("🧹 WebSocket server stopped")
+
+    async def broadcast_event(self, event_type: str, data: Dict[str, Any]):
+        """Broadcast an event to all connected WebSocket clients."""
+        print(f"📡 Broadcasting event: {event_type} to {len(self.websocket_clients)} clients")
+        if not self.websocket_clients:
+            print("⚠️ No WebSocket clients connected")
+            return
+
+        message = {
+            "type": event_type,
+            "data": data,
+            "timestamp": asyncio.get_event_loop().time()
+        }
+
+        # Convert message to JSON
+        json_message = json.dumps(message)
+
+        # Send to all connected clients
+        disconnected_clients = set()
+        for client in self.websocket_clients:
+            try:
+                await client.send(json_message)
+                print(f"✅ Sent to client: {client.remote_address}")
+            except Exception as e:
+                print(f"⚠️ Failed to send message to client: {e}")
+                disconnected_clients.add(client)
+
+        # Remove disconnected clients
+        for client in disconnected_clients:
+            self.websocket_clients.discard(client)
+
+    async def broadcast_screenshot(self, screenshot_b64: str, screenshot_type: str = "current"):
+        """Broadcast screenshot data to UI."""
+        await self.broadcast_event("screenshot_update", {
+            "screenshot_type": screenshot_type,
+            "screenshot_data": screenshot_b64,
+            "timestamp": asyncio.get_event_loop().time()
+        })
+
+    async def broadcast_ocr_results(self, ocr_results: List[Dict[str, Any]]):
+        """Broadcast OCR results to UI."""
+        await self.broadcast_event("ocr_update", {
+            "ocr_results": ocr_results,
+            "timestamp": asyncio.get_event_loop().time()
+        })
+
+    async def broadcast_grounding_call(self, model_name: str, instruction: str, coordinates: Optional[Tuple[int, int]], confidence: float, processing_time: float):
+        """Broadcast grounding model call results to UI."""
+        # Set grounding model as processing when starting, idle when complete
+        if coordinates is None:
+            # Starting grounding
+            await self.broadcast_event("agent_state", {
+                "orchestrator": "idle",
+                "programmer": "idle",
+                "gui_operator": "idle",
+                "grounding_model": "processing"
+            })
+        else:
+            # Grounding completed, set GUI operator back to processing
+            await self.broadcast_event("agent_state", {
+                "orchestrator": "idle",
+                "programmer": "idle",
+                "gui_operator": "processing",
+                "grounding_model": "idle"
+            })
+
+        await self.broadcast_event("grounding_update", {
+            "model_name": model_name,
+            "instruction": instruction,
+            "coordinates": coordinates,
+            "confidence": confidence,
+            "processing_time": processing_time,
+            "timestamp": asyncio.get_event_loop().time()
+        })
+
+    async def broadcast_function_call(self, agent_name: str, function_name: str, parameters: Dict[str, Any]):
+        """Broadcast function call details to UI."""
+        await self.broadcast_event("function_call_update", {
+            "agent_name": agent_name,
+            "function_name": function_name,
+            "parameters": parameters,
+            "timestamp": asyncio.get_event_loop().time()
+        })
 
 
     def _extract_sub_agent_final_message(self, history: List[Dict[str, Any]]) -> str:
@@ -95,22 +260,30 @@ class CoAct1:
         """Runs the CoAct-1 agent system on a given task."""
         print(f"\n🎬 [COACT-1 RUN] Starting task: '{task}'")
 
-        # Take initial screenshot for orchestrator context
-        print("📸 Taking initial screenshot for orchestrator...")
-        # Initialize the computer handler if needed
+        # Start WebSocket server for real-time updates
+        await self.start_websocket_server_async()
+
+        # Wait a moment for frontend to connect
+        await asyncio.sleep(2)
+
+        # Broadcast the original user task assigned to Orchestrator
+        print(f"📡 Broadcasting user_task_started: {task}")
+        await self.broadcast_event("user_task_started", {
+            "task": task,
+            "assigned_to": "Orchestrator"
+        })
+
+        # Set orchestrator as processing
+        await self.broadcast_event("agent_state", {
+            "orchestrator": "processing",
+            "programmer": "idle",
+            "gui_operator": "idle",
+            "grounding_model": "idle"
+        })
         if hasattr(self.orchestrator_tools._handler, '_initialize'):
             await self.orchestrator_tools._handler._initialize()
-        # Get the screenshot from the computer handler
-        initial_screenshot_b64 = await self.orchestrator_tools._handler.screenshot()
-        print("   ✅ Initial screenshot taken")
 
-        # Create initial user message with task and screenshot
-        initial_content = [
-            {"type": "text", "text": f"{task}\n\nHere is the current screen. What is the next subtask?"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{initial_screenshot_b64}"}}
-        ]
-
-        orchestrator_history: List[Dict[str, Any]] = [{"role": "user", "content": initial_content}]
+        orchestrator_history: List[Dict[str, Any]] = []
     
         for i in range(10): # Max 10 steps
             print(f"\n--- Step {i+1} ---")
@@ -121,9 +294,13 @@ class CoAct1:
                 current_screenshot_b64 = await self.orchestrator_tools._handler.screenshot()
                 print("   ✅ Current screenshot taken")
 
+                # Broadcast current screenshot to UI
+                await self.broadcast_screenshot(current_screenshot_b64, "current")
+
                 orchestrator_history.append({
                     "role": "user",
                     "content": [
+                        {"type": "text", "text": f"{task}\n"},
                         {"type": "text", "text": "What is the next subtask based on the current progress? (or you can call task_completed)"},
                         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_screenshot_b64}"}}
                     ]
@@ -162,50 +339,101 @@ class CoAct1:
 
             if tool_name == "task_completed":
                 print("✅ Task completed!")
+                # Set all agents to idle
+                await self.broadcast_event("agent_state", {
+                    "orchestrator": "idle",
+                    "programmer": "idle",
+                    "gui_operator": "idle",
+                    "grounding_model": "idle"
+                })
+                # Broadcast task completion event
+                await self.broadcast_event("task_completed", {
+                    "task": task,
+                    "step": i + 1
+                })
                 break
-            
+
             sub_agent = None
+            target_agent = ""
             if tool_name == "delegate_to_programmer":
                 print(f"👨‍💻 Delegating to Programmer: {subtask}")
                 sub_agent = self.programmer
+                target_agent = "Programmer"
+                # Set programmer as processing, others idle
+                await self.broadcast_event("agent_state", {
+                    "orchestrator": "idle",
+                    "programmer": "processing",
+                    "gui_operator": "idle",
+                    "grounding_model": "idle"
+                })
             elif tool_name == "delegate_to_gui_operator":
                 print(f"🖱️ Delegating to GUI Operator: {subtask}")
                 sub_agent = self.gui_operator
+                target_agent = "GUIOperator"
+                # Set GUI operator as processing, others idle
+                await self.broadcast_event("agent_state", {
+                    "orchestrator": "idle",
+                    "programmer": "idle",
+                    "gui_operator": "processing",
+                    "grounding_model": "idle"
+                })
             else:
                 print(f"❓ Unknown delegation: {tool_name}")
                 continue
 
-            # 3. Run sub-agent with the task and current image context
-            # Get the current screenshot from orchestrator history
-            current_image_b64 = get_last_image_b64(orchestrator_history)
+            # Broadcast task delegation event with the actual message sent to agent
+            delegation_message = f"{target_agent}: {subtask}"
+            print(f"🔄 Broadcasting task_delegated: {delegation_message} (step {i+1})")
 
-            # Create sub-agent history starting with the subtask
-            if current_image_b64:
-                # Include the image directly in the subtask message
-                sub_agent_history = [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"{subtask}\n\nHere is the current screen state:"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_image_b64}"}}
-                    ]
-                }]
-                print("   🖼️ Provided image context to sub-agent")
-            else:
-                sub_agent_history = [{
-                    "role": "user",
-                    "content": subtask
-                }]
+            await self.broadcast_event("task_delegated", {
+                "task_id": f"sub-{i+1}",
+                "description": delegation_message,
+                "assigned_to": target_agent,
+                "parent_task": task,
+                "step": i + 1
+            })
+            
+        
+            # Include the image directly in the subtask message
+            sub_agent_history = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"{subtask}\n\nHere is the current screen state:"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_screenshot_b64}"}}
+                ]
+            }]
+            print("   🖼️ Provided image context to sub-agent")
+           
 
             async for result in sub_agent.run(sub_agent_history):
                 sub_agent_history.extend(result.get("output", []))
 
-            # 4. Get the latest screenshot from the sub-agent's history
-            final_screenshot_b64 = get_last_image_b64(sub_agent_history)
+            final_screenshot_b64 = await self.orchestrator_tools._handler.screenshot()
+
+            # Broadcast final screenshot as previous screenshot for next iteration
+            await self.broadcast_screenshot(final_screenshot_b64, "previous")
 
             # 5. Extract the sub-agent's final completion message
             print("📝 Extracting sub-agent completion message...")
             final_message = self._extract_sub_agent_final_message(sub_agent_history)
             print(f"Final message: {final_message}")
+
+            # Set orchestrator back to processing for next iteration
+            await self.broadcast_event("agent_state", {
+                "orchestrator": "processing",
+                "programmer": "idle",
+                "gui_operator": "idle",
+                "grounding_model": "idle"
+            })
+
+            # Broadcast sub-agent completion event
+            await self.broadcast_event("subtask_completed", {
+                "task_id": f"sub-{i+1}",
+                "description": subtask,
+                "assigned_to": target_agent,
+                "result": final_message,
+                "step": i + 1
+            })
 
             # Create a message with the sub-agent's final message and the current screenshot for orchestrator evaluation
             orchestrator_result_content = [
@@ -223,31 +451,3 @@ class CoAct1:
                 "call_id": delegation.get("call_id", f"call_{hash(str(delegation))}"),
                 "output": orchestrator_result_content,
             })
-
-def get_last_image_b64(messages: List[Dict[str, Any]]) -> Optional[str]:
-    """Get the last image from a list of messages, checking both user messages and tool outputs."""
-    for message in reversed(messages):
-        # Check user messages with content lists
-        if message.get("role") == "user" and isinstance(message.get("content"), list):
-            for content_item in reversed(message["content"]):
-                if content_item.get("type") == "image_url":
-                    image_url = content_item.get("image_url", {}).get("url", "")
-                    if image_url.startswith("data:image/png;base64,"):
-                        return image_url.split(",", 1)[1]
-        
-        # Check computer call outputs
-        elif message.get("type") == "computer_call_output" and isinstance(message.get("output"), dict):
-            output = message["output"]
-            if output.get("type") == "input_image":
-                image_url = output.get("image_url", "")
-                if image_url.startswith("data:image/png;base64,"):
-                    return image_url.split(",", 1)[1]
-
-        # Check function call outputs (for orchestrator results with multimodal content)
-        elif message.get("type") == "function_call_output" and isinstance(message.get("output"), list):
-            for content_item in reversed(message["output"]):
-                if content_item.get("type") == "image_url":
-                    image_url = content_item.get("image_url", {}).get("url", "")
-                if image_url.startswith("data:image/png;base64,"):
-                    return image_url.split(",", 1)[1]
-    return None

@@ -155,7 +155,7 @@ class ProgrammerTools:
         return f"Installed packages {requirements} in virtual environment '{venv_name}'"
 
 
-def create_programmer(programmer_model: str, programmer_tools: ProgrammerTools) -> ComputerAgent:
+def create_programmer(programmer_model: str, programmer_tools: ProgrammerTools, screenshot_broadcast_callback=None, function_call_broadcast_callback=None) -> ComputerAgent:
     """Creates and configures the Programmer agent."""
     instructions = open("agent_prompts/Programmer.txt", "r").read()
 
@@ -181,10 +181,18 @@ def create_programmer(programmer_model: str, programmer_tools: ProgrammerTools) 
         programmer_tools.venv_install,
     ]
 
+    # Prepare callbacks list
+    callbacks = []
+    if screenshot_broadcast_callback:
+        from agent.callbacks import ScreenshotBroadcastCallback
+        callbacks.append(ScreenshotBroadcastCallback(screenshot_broadcast_callback, "Programmer"))
+
     print(f"👨‍💻 [PROGRAMMER] Initializing with model: {programmer_model}")
     return ComputerAgent(
         model=programmer_model,
         tools=programmer_tool_methods,
+        function_call_broadcast_callback=function_call_broadcast_callback,
+        callbacks=callbacks,
         instructions=instructions,
         verbosity=logging.WARNING
     )

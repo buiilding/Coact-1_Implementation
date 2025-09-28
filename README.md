@@ -36,8 +36,9 @@ CoAct-1 implements a hierarchical multi-agent system inspired by the paper ["CoA
 #### 3. GUI Operator Agent
 - **Model**: `huggingface-local/OpenGVLab/InternVL3_5-4B+gemini/gemini-2.5-flash`
 - **Role**: Vision-based GUI manipulation and visual element interaction
-- **Capabilities**: Mouse/keyboard simulation, screenshot analysis, element detection
-- **Efficiency Principle**: Minimize vision model calls, prefer keyboard shortcuts over mouse clicks
+- **Capabilities**: Mouse/keyboard simulation, screenshot analysis, OCR text detection, element interaction
+- **OCR Features**: Automatic text element detection, click-by-text functionality, confidence scoring
+- **Efficiency Principle**: Minimize vision model calls, prefer keyboard shortcuts over mouse clicks, leverage OCR for precise text interactions
 
 ## Prerequisites
 
@@ -181,6 +182,7 @@ The system uses a sophisticated computer abstraction built on CUA (Computer Use 
 Agents communicate through multimodal messages containing:
 - Text instructions and task descriptions
 - Base64-encoded screenshot images
+- OCR-detected text elements with bounding boxes and confidence scores
 - Function call delegations and results
 - Progress summaries and status updates
 

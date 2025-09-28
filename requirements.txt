@@ -13,3 +13,4 @@ timm
 rapidocr
 pyautogui
 screeninfo
+websockets

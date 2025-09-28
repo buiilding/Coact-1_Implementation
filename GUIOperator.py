@@ -119,36 +119,106 @@ class GuiOperatorComputerProxy:
         except Exception as e:
             return f"Error clicking OCR text element {ocr_id}: {e}"
 
+    async def right_click_ocr_text(self, ocr_id: int) -> str:
+        """
+        Right-click on an OCR-detected text element by ID.
+
+        Args:
+            ocr_id: The ID of the OCR text element to right-click
+
+        Returns:
+            Success message or error message
+        """
+        if not self.ocr_callback:
+            return f"Error: OCR callback not available"
+
+        bbox = self.ocr_callback.get_ocr_bbox(ocr_id)
+        if bbox is None:
+            return f"Error: OCR ID {ocr_id} not found"
+
+        x1, y1, x2, y2 = bbox
+        # Calculate center coordinates
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+
+        try:
+            # Perform the right-click at center coordinates
+            await self.interface.right_click(center_x, center_y)
+            content = self.ocr_callback.get_ocr_content(ocr_id) or f"ID {ocr_id}"
+            return f"Successfully right-clicked on OCR text element: '{content}' at ({center_x}, {center_y})"
+        except Exception as e:
+            return f"Error right-clicking OCR text element {ocr_id}: {e}"
+
+    async def double_click_ocr_text(self, ocr_id: int) -> str:
+        """
+        Double-click on an OCR-detected text element by ID.
+
+        Args:
+            ocr_id: The ID of the OCR text element to double-click
+
+        Returns:
+            Success message or error message
+        """
+        if not self.ocr_callback:
+            return f"Error: OCR callback not available"
+
+        bbox = self.ocr_callback.get_ocr_bbox(ocr_id)
+        if bbox is None:
+            return f"Error: OCR ID {ocr_id} not found"
+
+        x1, y1, x2, y2 = bbox
+        # Calculate center coordinates
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+
+        try:
+            # Perform the double-click at center coordinates
+            await self.interface.double_click(center_x, center_y)
+            content = self.ocr_callback.get_ocr_content(ocr_id) or f"ID {ocr_id}"
+            return f"Successfully double-clicked on OCR text element: '{content}' at ({center_x}, {center_y})"
+        except Exception as e:
+            return f"Error double-clicking OCR text element {ocr_id}: {e}"
+
     # The ComputerAgent's handler needs to check if the computer is initialized.
     @property
     def _initialized(self):
         return self._computer_instance._initialized
 
 
-def create_gui_operator(gui_operator_model: str, gui_operator_computer: Computer) -> ComputerAgent:
+def create_gui_operator(gui_operator_model: str, gui_operator_computer: Computer, ocr_broadcast_callback=None, grounding_broadcast_callback=None, function_call_broadcast_callback=None, screenshot_broadcast_callback=None) -> ComputerAgent:
     """Creates and configures the GUI Operator agent with OCR support."""
     instructions = open("agent_prompts/GUIOperator.txt", "r").read()
 
     # Create OCR callback for preprocessing screenshots
-    ocr_callback = OCRProcessorCallback(device="cuda")
+    ocr_callback = OCRProcessorCallback(device="cuda", broadcast_callback=ocr_broadcast_callback)
 
     # Create the GUI computer proxy with OCR callback
     gui_proxy = GuiOperatorComputerProxy(gui_operator_computer, ocr_callback)
 
     # Gather all methods from the proxy instance to pass to the agent
     gui_operator_tool_methods = [
-        gui_proxy.click_ocr_text,  # OCR text clicking function
+        gui_proxy.click_ocr_text,      # OCR text clicking function
+        gui_proxy.right_click_ocr_text,  # OCR text right-clicking function
+        gui_proxy.double_click_ocr_text, # OCR text double-clicking function
         gui_proxy,  # The computer proxy itself for GUI operations
     ]
+
+    # Prepare callbacks list
+    callbacks = [ocr_callback]  # Always include OCR callback
+    if screenshot_broadcast_callback:
+        from agent.callbacks import ScreenshotBroadcastCallback
+        callbacks.append(ScreenshotBroadcastCallback(screenshot_broadcast_callback, "GUIOperator"))
 
     print(f"🎭 [GUI OPERATOR] Initializing with model: {gui_operator_model} (with OCR support)")
     return ComputerAgent(
         model=gui_operator_model,
         tools=gui_operator_tool_methods,
-        callbacks=[ocr_callback],  # Add OCR callback
+        grounding_broadcast_callback=grounding_broadcast_callback,
+        function_call_broadcast_callback=function_call_broadcast_callback,
+        callbacks=callbacks,
         instructions=instructions,
         verbosity=logging.WARNING,
         trust_remote_code=True,
-        only_n_most_recent_images=4,
+        only_n_most_recent_images=2,
         screenshot_delay=1.0,  # Wait 1 second after actions before screenshot
     )
