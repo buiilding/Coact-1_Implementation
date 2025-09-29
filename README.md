@@ -95,6 +95,52 @@ python coact_1.py -m "Create a text file with 'Hello World' content"
 python coact_1.py -m "Open terminal and run 'ls -la'"
 ```
 
+## Web-based Real-time Visualization
+
+CoAct-1 includes a modern web interface for real-time visualization of agent execution, featuring live screenshots, OCR text detection, grounding model predictions, and function call logs.
+
+### Running the Web Interface
+
+#### 1. Start the Web Application
+
+```bash
+# Navigate to the web application directory
+cd agent-viz-canvas
+
+# Install dependencies
+npm install
+
+# Start the development server
+npm run dev
+```
+
+The web interface will be available at `http://localhost:5173` (or similar, check the terminal output).
+
+#### 2. Run CoAct-1 with Real-time Updates
+
+In a separate terminal, start CoAct-1 to see live progress:
+
+```bash
+# Navigate back to the main directory
+cd ..
+
+# Run CoAct-1 with a task
+python main.py -m "get me my roboflow api key"
+```
+
+### Web Interface Features
+
+- **Live Screenshots**: Real-time display of the computer screen as agents interact
+- **OCR Text Detection**: Automatic text element detection with bounding boxes
+- **Grounding Model Panel**: Shows when vision models predict click coordinates
+- **Function Call Log**: Live tracking of all agent actions and tool calls
+- **Agent State Indicators**: Visual status of Orchestrator, Programmer, and GUI Operator
+- **Task Progress**: Hierarchical view of task decomposition and completion
+
+### WebSocket Communication
+
+The system uses WebSocket connections on port 8765 for real-time data streaming between the Python backend and web frontend.
+
 ## Detailed Usage
 
 ### Command Line Interface
